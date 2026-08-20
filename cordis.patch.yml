@@ -1,0 +1,4 @@
+# dsh-comfyui bundle patch: inserts the plugin into a profile's layer stack.
+- insert:
+    - id: comfyui
+      name: 'dsh-comfyui'
