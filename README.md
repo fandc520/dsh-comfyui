@@ -39,6 +39,15 @@
 - **设置页** —— DH 设置里新增 "ComfyUI" 分区：改服务器地址、API Key 环境变量名、数据目录、资产上限、测试连接，并可切换插件界面语言（中文 / English——存于浏览器，作用于整个插件 UI），无需改动 `cordis.yml`。
 - **配套 skill** —— 通过 `ctx.skills.register` 注册的运行时 skill（`dsh-comfyui-workflows`）：让 Agent 掌握图工作流 vs 执行流的概念、画布分析规则（连通分量、绕过组、悬空节点）、何时该询问你提取方式，以及图→API 提取的技术规则。
 
+## 界面预览
+
+<p align="center">
+  <img src="images/panel.png" width="49%" alt="插件主面板：工作流 / 资产 / 队列" title="插件主面板：工作流 / 资产 / 队列" />
+  <img src="images/loadarea.png" width="49%" alt="加载区：图像选择与上传" title="加载区：图像选择与上传" />
+  <br />
+  <img src="images/settings.png" width="49%" alt="ComfyUI 设置页（含界面语言切换）" title="ComfyUI 设置页（含界面语言切换）" />
+</p>
+
 ### 图工作流 vs 可运行工作流（提取执行流）
 
 ComfyUI 分两层：

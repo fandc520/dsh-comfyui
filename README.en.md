@@ -39,6 +39,15 @@
 - **Settings page** — a ComfyUI section in the DH settings where you can edit the server URL, API-key env var, data directory, and asset cap, test the connection, and switch the plugin UI language (Chinese / English — stored in the browser, applies to the whole plugin UI), all without touching `cordis.yml`.
 - **Companion skill** — a runtime skill (`dsh-comfyui-workflows`) registered through `ctx.skills.register`: the agent learns the graph-vs-runnable model, canvas analysis rules (connected components, bypassed groups, dangling nodes), when to ask you about extract mode, and the extraction tech rules.
 
+## Screenshots
+
+<p align="center">
+  <img src="images/panel.png" width="49%" alt="Main panel: workflows / assets / queue" title="Main panel: workflows / assets / queue" />
+  <img src="images/loadarea.png" width="49%" alt="Load area: image picking and upload" title="Load area: image picking and upload" />
+  <br />
+  <img src="images/settings.png" width="49%" alt="ComfyUI settings page (with UI language switch)" title="ComfyUI settings page (with UI language switch)" />
+</p>
+
 ### Graph workflows vs runnable workflows
 
 ComfyUI works in two layers:
