@@ -200,8 +200,6 @@ npm pack --dry-run  # 检查发布内容
 
 本地测试：`dsh plugin --profile web add <本仓库路径>`（pnpm 链接目录），重启 Web 服务，改动后 `npm run build` 重新构建。
 
-维护者请阅读 [DEVELOPMENT.md](DEVELOPMENT.md)：当前版本、进度时间线、git 与 npm 发布流程、改动生效规则。
-
 ## License
 
 MIT

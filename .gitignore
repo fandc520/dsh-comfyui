@@ -2,3 +2,5 @@ node_modules/
 lib/
 client/
 *.tsbuildinfo
+# 本地维护笔记，不对外发布/追踪
+DEVELOPMENT.md
