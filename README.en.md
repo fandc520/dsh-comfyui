@@ -18,35 +18,59 @@
 
 ## Features
 
-- **Agent tools**
-  - `comfyui_run` — submit a ComfyUI API-format workflow, or pick a built-in template, and get the generated media back. Two modes: `sync` (wait and return media) and `async` (start a background job, collect with `job_output` — ideal for video).
-  - `comfyui_object_info` — list the node definitions of your ComfyUI server so the agent can build valid workflows on the fly.
-  - `comfyui_workflow` — list and run runnable workflows from the plugin library. `action: list` also reports graph workflows you saved on the ComfyUI server and whether each has been **extracted** into runnable workflows; unextracted graphs are flagged so the agent tells you to extract them in the panel first.
-- **UI panel** (right-docked; open from the sidebar rail) — three tabs:
-  - **Workflows** — the plugin library of runnable (API) workflows: create / edit / run / delete, plus "Import file" to load an API-format `.json` directly. The **ComfyUI-saved graphs** section auto-detects graph workflows you saved in ComfyUI, shows which runnable workflows were extracted from each, and offers **extract** with per-graph analysis: a canvas often holds several independent flows, so you choose extract all / extract per component / extract main flow only. Workflows can be classified with **tags** (see below).
-  - **Assets** — everything the plugin generated, newest first, with a detail view and download links.
-  - **Queue** — a task center over ComfyUI's unified jobs API (`/api/jobs`): every task across the live queue **and** history in five states (pending / in progress / completed / failed / cancelled), filterable by state, with per-task progress bars (plugin-submitted jobs), preview thumbnails, failure messages and duration, plus actions — delete, interrupt, rerun, clear queue/history, free memory. Tasks the plugin queued are marked with their workflow name.
-- **Load area** — an image loader in the style of ComfyUI's LoadImage node, sitting at the top of the Workflows tab:
-  - Shows the **current source image** as a large preview; clicking opens a picker window with a nav bar (All / Imported / Generated), a type filter, a paste/upload drop zone on the right, and a masonry grid of every image in the ComfyUI `input` directory plus everything the plugin generated. Picking an image closes the window and makes it the current source.
-  - The current source image is the **default input image**: any workflow run that has an unset image-type parameter uses it automatically — the agent does not need to name a file.
-  - **Resolution auto-match**: uploads record their pixel size; when a run leaves `width`/`height` unset, they default to the source image's actual size.
-  - **Hash naming + dedup**: uploads are renamed to `original_shorthash.ext` (SHA-256 first 10 hex); re-uploading an identical file reuses the existing name instead of storing a duplicate. The picker refreshes live after uploads.
-  - Selecting a **generated** image copies it from the output directory into `input` on the fly, so image-loading nodes can use it.
-- **Workflow tags** — classify runnable workflows with preset categories (image-to-image / text-to-image / text-to-video / image-to-video / reference-to-video / text-to-audio / reference-to-audio) plus any custom tags. Tags are edited in the workflow editor, shown on the top-right of each card, and the library list has a filter bar with per-tag counts.
-- **Built-in templates** — `txt2img` (SDXL text-to-image), `img2img` (SDXL image-to-image), `video` (Wan 2.1 text-to-video via ComfyUI-WanVideoWrapper). Template node ids are documented in the tool description so the agent overrides the right inputs.
-- **Media proxy** — generated files stream through a same-origin route (`/comfyui/media`), so the browser never talks to ComfyUI directly: no CORS, no mixed-content, no API key in the page, and remote ComfyUI installs work unchanged.
-- **Tool card** — results render as a media wall (images/videos with download links) right in the chat, including background-job status.
-- **Settings page** — a ComfyUI section in the DH settings where you can edit the server URL, API-key env var, data directory, and asset cap, test the connection, and switch the plugin UI language (Chinese / English — stored in the browser, applies to the whole plugin UI), all without touching `cordis.yml`.
-- **Companion skill** — a runtime skill (`dsh-comfyui-workflows`) registered through `ctx.skills.register`: the agent learns the graph-vs-runnable model, canvas analysis rules (connected components, bypassed groups, dangling nodes), when to ask you about extract mode, and the extraction tech rules.
+### Agent tools
 
-## Screenshots
+- `comfyui_run` — submit a ComfyUI API-format workflow, or pick a built-in template, and get the generated media back. Two modes: `sync` (wait and return media) and `async` (start a background job, collect with `job_output` — ideal for video).
+- `comfyui_object_info` — list the node definitions of your ComfyUI server so the agent can build valid workflows on the fly.
+- `comfyui_workflow` — list and run runnable workflows from the plugin library. `action: list` also reports graph workflows you saved on the ComfyUI server and whether each has been **extracted** into runnable workflows; unextracted graphs are flagged so the agent tells you to extract them in the panel first.
 
-<p align="center">
-  <img src="images/panel.png" width="49%" alt="Main panel: workflows / assets / queue" title="Main panel: workflows / assets / queue" />
-  <img src="images/loadarea.png" width="49%" alt="Load area: image picking and upload" title="Load area: image picking and upload" />
-  <br />
-  <img src="images/settings.png" width="49%" alt="ComfyUI settings page (with UI language switch)" title="ComfyUI settings page (with UI language switch)" />
-</p>
+### UI panel
+
+Right-docked; open from the sidebar rail — three tabs:
+
+- **Workflows** — the plugin library of runnable (API) workflows: create / edit / run / delete, plus "Import file" to load an API-format `.json` directly. The **ComfyUI-saved graphs** section auto-detects graph workflows you saved in ComfyUI, shows which runnable workflows were extracted from each, and offers **extract** with per-graph analysis: a canvas often holds several independent flows, so you choose extract all / extract per component / extract main flow only. Workflows can be classified with **tags** (see below).
+- **Assets** — everything the plugin generated, newest first, with a detail view and download links.
+- **Queue** — a task center over ComfyUI's unified jobs API (`/api/jobs`): every task across the live queue **and** history in five states (pending / in progress / completed / failed / cancelled), filterable by state, with per-task progress bars (plugin-submitted jobs), preview thumbnails, failure messages and duration, plus actions — delete, interrupt, rerun, clear queue/history, free memory. Tasks the plugin queued are marked with their workflow name.
+
+<p align="center"><img src="images/panel.png" width="70%" alt="Main panel: workflows / assets / queue" title="Main panel: workflows / assets / queue" /></p>
+
+### Load area
+
+An image loader in the style of ComfyUI's LoadImage node, sitting at the top of the Workflows tab:
+
+- Shows the **current source image** as a large preview; clicking opens a picker window with a nav bar (All / Imported / Generated), a type filter, a paste/upload drop zone on the right, and a masonry grid of every image in the ComfyUI `input` directory plus everything the plugin generated. Picking an image closes the window and makes it the current source.
+- The current source image is the **default input image**: any workflow run that has an unset image-type parameter uses it automatically — the agent does not need to name a file.
+- **Resolution auto-match**: uploads record their pixel size; when a run leaves `width`/`height` unset, they default to the source image's actual size.
+- **Hash naming + dedup**: uploads are renamed to `original_shorthash.ext` (SHA-256 first 10 hex); re-uploading an identical file reuses the existing name instead of storing a duplicate. The picker refreshes live after uploads.
+- Selecting a **generated** image copies it from the output directory into `input` on the fly, so image-loading nodes can use it.
+
+<p align="center"><img src="images/loadarea.png" width="70%" alt="Load area: image picking and upload" title="Load area: image picking and upload" /></p>
+
+### Workflow tags
+
+Classify runnable workflows with preset categories (image-to-image / text-to-image / text-to-video / image-to-video / reference-to-video / text-to-audio / reference-to-audio) plus any custom tags. Tags are edited in the workflow editor, shown on the top-right of each card, and the library list has a filter bar with per-tag counts.
+
+### Built-in templates
+
+`txt2img` (SDXL text-to-image), `img2img` (SDXL image-to-image), `video` (Wan 2.1 text-to-video via ComfyUI-WanVideoWrapper). Template node ids are documented in the tool description so the agent overrides the right inputs.
+
+### Media proxy
+
+Generated files stream through a same-origin route (`/comfyui/media`), so the browser never talks to ComfyUI directly: no CORS, no mixed-content, no API key in the page, and remote ComfyUI installs work unchanged.
+
+### Tool card
+
+Results render as a media wall (images/videos with download links) right in the chat, including background-job status.
+
+### Settings page
+
+A ComfyUI section in the DH settings where you can edit the server URL, API-key env var, data directory, and asset cap, test the connection, and switch the plugin UI language (Chinese / English — stored in the browser, applies to the whole plugin UI), all without touching `cordis.yml`.
+
+<p align="center"><img src="images/settings.png" width="70%" alt="ComfyUI settings page (with UI language switch)" title="ComfyUI settings page (with UI language switch)" /></p>
+
+### Companion skill
+
+A runtime skill (`dsh-comfyui-workflows`) registered through `ctx.skills.register`: the agent learns the graph-vs-runnable model, canvas analysis rules (connected components, bypassed groups, dangling nodes), when to ask you about extract mode, and the extraction tech rules.
 
 ### Graph workflows vs runnable workflows
 
