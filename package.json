@@ -1,6 +1,6 @@
 {
   "name": "dsh-comfyui",
-  "version": "0.3.0-beta.1",
+  "version": "0.3.0-beta.2",
   "description": "Drive ComfyUI from DeepSeek Harness: generate and process images and videos through agent tools, with a workflow/asset/queue panel, in-chat results and a settings page. / 让 DeepSeek Harness 的 Agent 直接驱动 ComfyUI 生成与处理图像、视频，带工作流/资产/队列面板。",
   "type": "module",
   "main": "lib/index.js",
@@ -21,6 +21,7 @@
     "README.md",
     "README.en.md",
     "logo.png",
+    "images",
     "LICENSE"
   ],
   "scripts": {
