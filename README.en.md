@@ -200,6 +200,8 @@ npm pack --dry-run  # inspect the publish contents
 
 To test against a local profile: `dsh plugin --profile web add <path-to-this-repo>` (pnpm links the directory), restart the web server, and rebuild with `npm run build` after changes.
 
+Maintainers: see [DEVELOPMENT.md](DEVELOPMENT.md) for the current version, progress timeline, and the git/npm release workflow.
+
 ## License
 
 MIT
