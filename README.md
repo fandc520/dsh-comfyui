@@ -3,7 +3,7 @@
 [English](README.en.md) | **中文**
 
 <p align="center">
-  <img src="logo.png" width="180" alt="dsh-comfyui logo" />
+  <img src="logo.png" width="480" alt="dsh-comfyui logo" />
 </p>
 
 <h1 align="center">dsh-comfyui</h1>
