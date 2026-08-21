@@ -36,10 +36,10 @@ Right-docked; open from the sidebar rail — three tabs:
 
 ### Load area
 
-An image loader in the style of ComfyUI's LoadImage node, sitting at the top of the Workflows tab:
+A media loader in the style of ComfyUI's LoadImage node, sitting at the top of the Workflows tab: besides images, the picker also lists the video and audio files available to the ComfyUI loader nodes (LoadVideo / LoadAudio).
 
 - Shows the **current source image** as a large preview; clicking opens a picker window with a nav bar (All / Imported / Generated), a type filter, a paste/upload drop zone on the right, and a masonry grid of every image in the ComfyUI `input` directory plus everything the plugin generated. Picking an image closes the window and makes it the current source.
-- The current source image is the **default input image**: any workflow run that has an unset image-type parameter uses it automatically — the agent does not need to name a file.
+- The current source image is the **default input image**: an unset image-loading parameter of a workflow run is filled with the current source image (the first image parameter when there are several) — the agent does not need to name a file.
 - **Resolution auto-match**: uploads record their pixel size; when a run leaves `width`/`height` unset, they default to the source image's actual size.
 - **Hash naming + dedup**: uploads are renamed to `original_shorthash.ext` (SHA-256 first 10 hex); re-uploading an identical file reuses the existing name instead of storing a duplicate. The picker refreshes live after uploads.
 - Selecting a **generated** image copies it from the output directory into `input` on the fly, so image-loading nodes can use it.
@@ -56,7 +56,7 @@ Classify runnable workflows with preset categories (image-to-image / text-to-ima
 
 ### Media proxy
 
-Generated files stream through a same-origin route (`/comfyui/media`), so the browser never talks to ComfyUI directly: no CORS, no mixed-content, no API key in the page, and remote ComfyUI installs work unchanged.
+Generated files stream through a same-origin route (`/comfyui/media`), so the browser never talks to ComfyUI directly: no CORS, no mixed-content, no API key in the page, and remote ComfyUI installs work unchanged. The media URL base is auto-detected: on every page load the browser self-reports the origin it actually uses via `/comfyui/ping` (LAN IP / domain / reverse proxy all produce working links), or you can pin it explicitly with the `mediaHost` config key.
 
 ### Tool card
 
@@ -64,7 +64,7 @@ Results render as a media wall (images/videos with download links) right in the 
 
 ### Settings page
 
-A ComfyUI section in the DH settings where you can edit the server URL, API-key env var, data directory, and asset cap, test the connection, and switch the plugin UI language (Chinese / English — stored in the browser, applies to the whole plugin UI), all without touching `cordis.yml`.
+A ComfyUI section in the DH settings where you can edit the server URL (`baseUrl`), API-key env var (`apiKeyEnv`), media base URL (`mediaHost`), test the connection, and switch the plugin UI language (Chinese / English — stored in the browser, applies to the whole plugin UI), all without touching `cordis.yml`. The data directory and asset cap are configured in `cordis.yml` only and are not exposed in the settings page.
 
 <p align="center"><img src="images/settings.png" width="70%" alt="ComfyUI settings page (with UI language switch)" title="ComfyUI settings page (with UI language switch)" /></p>
 
@@ -98,17 +98,25 @@ Every runnable workflow carries an adjustable **parameter set** (`parameters`) s
 
 ## Requirements
 
-- DeepSeek Harness (web profile) — the plugin targets the `web` profile (`@deepseek-ai/dsh-web-app` ≥ 0.1.0-rc.6).
+- DeepSeek Harness (web / desktop profile) — the plugin targets the `web` and `desktop` profiles (web side requires `@deepseek-ai/dsh-web-app` ≥ 0.1.0-rc.6).
 - A running [ComfyUI](https://github.com/comfystack/ComfyUI) server (default `http://127.0.0.1:8188`).
 - For the `video` template: the [ComfyUI-WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper) custom nodes and Wan 2.1 model files.
 
 ## Installation
 
+Web profile:
+
 ```sh
 dsh plugin --profile web add dsh-comfyui
 ```
 
-Then restart the web server (host-side rows mount at boot). The panel trigger appears in the sidebar rail, the settings section "ComfyUI" appears in the settings page, and the agent gains `comfyui_run`, `comfyui_object_info`, `comfyui_workflow`, and the `dsh-comfyui-workflows` skill immediately.
+Desktop profile:
+
+```sh
+dsh plugin --profile desktop add dsh-comfyui
+```
+
+Then restart the corresponding app (web server or desktop app; host-side rows mount at boot). The panel trigger appears in the sidebar rail, the settings section "ComfyUI" appears in the settings page, and the agent gains `comfyui_run`, `comfyui_object_info`, `comfyui_workflow`, and the `dsh-comfyui-workflows` skill immediately.
 
 ### API key (remote servers)
 
@@ -137,10 +145,11 @@ The plugin reads a `comfyui` section from `cordis.yml` (or the settings page):
   config:
     baseUrl: http://127.0.0.1:8188
     apiKeyEnv: COMFYUI_API_KEY
-    timeoutMs: 180000
+    timeoutMs: 900000
     maxMediaItems: 12
     dataDir: ''
     maxAssets: 200
+    mediaHost: ''
 ```
 
 | Key | Default | Description |
@@ -148,14 +157,15 @@ The plugin reads a `comfyui` section from `cordis.yml` (or the settings page):
 | `baseUrl` | `http://127.0.0.1:8188` | ComfyUI HTTP server base URL |
 | `apiKeyEnv` | `COMFYUI_API_KEY` | Env-variable / credential name for the optional API key |
 | `connectTimeoutMs` | `10000` | Per-request connect/read timeout |
-| `timeoutMs` | `180000` | Sync generation wait budget (raise for video) |
+| `timeoutMs` | `900000` | Sync generation wait budget (15 min; raise for video) |
 | `pollIntervalMs` | `1000` | History polling interval while waiting |
 | `maxMediaItems` | `12` | Max media items returned per workflow |
 | `maxMediaBytes` | `67108864` | Max bytes the media proxy streams per file |
 | `dataDir` | *(DSH data dir)* | Where the workflow library and asset index live (`$DSH_HOME/data/dsh-comfyui` by default) |
 | `maxAssets` | `200` | Max entries kept in the asset index |
+| `mediaHost` | `''` (auto-detect) | External base URL for generated media (e.g. `http://192.168.1.5:3080`); empty auto-uses the origin the browser actually reaches this server with |
 
-## Roadmap & design boundaries (v0.2)
+## Roadmap & design boundaries
 
 Confirmed scope decisions for this phase:
 

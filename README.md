@@ -36,10 +36,10 @@
 
 ### 加载区
 
-仿 ComfyUI LoadImage 节点的图像加载器，位于工作流页顶部：
+仿 ComfyUI LoadImage 节点的媒体加载器，位于工作流页顶部：除图片外，选择窗口也会列出 ComfyUI 加载节点（LoadVideo / LoadAudio）可用的视频与音频文件。
 
 - 当前源图以大图展示；点击打开加载窗口：上方导航条（全部 / 已导入 / 已生成）、类型筛选、右侧粘贴/上传区、下方瀑布流网格展示 ComfyUI `input` 目录全部图片 + 插件生成的全部结果。点击图像即选定并关闭窗口，成为当前源图。
-- 当前源图即**默认输入图**：任何含图片类参数（未显式指定）的工作流运行都会自动使用它——无需指定文件名。
+- 当前源图即**默认输入图**：工作流运行中未显式指定的图片加载参数会自动填入当前源图（多个图片加载参数时取第一个）——无需指定文件名。
 - **分辨率自动匹配**：上传时记录像素尺寸；运行时不传 `width`/`height` 则自动用源图实际分辨率。
 - **哈希命名 + 去重**：上传重命名为 `原名_短哈希.ext`（SHA-256 前 10 位十六进制）；重复上传相同文件直接复用已有文件名，不产生重复存储。上传后列表实时刷新。
 - 选中**已生成**的图时会自动从输出目录复制到 `input`，图像加载节点即可使用。
@@ -56,7 +56,7 @@
 
 ### 媒体代理
 
-生成文件经同源路由（`/comfyui/media`）转发，浏览器不直接接触 ComfyUI：没有 CORS、没有混合内容、页面里不出现 API Key，远程 ComfyUI 部署也可直接使用。
+生成文件经同源路由（`/comfyui/media`）转发，浏览器不直接接触 ComfyUI：没有 CORS、没有混合内容、页面里不出现 API Key，远程 ComfyUI 部署也可直接使用。媒体 URL 的访问地址自动检测：页面加载时浏览器经 `/comfyui/ping` 自报实际访问的 origin（局域网 IP / 域名 / 反向代理都能拼出正确的链接），也可用配置键 `mediaHost` 显式指定基址。
 
 ### 工具卡片
 
@@ -64,7 +64,7 @@
 
 ### 设置页
 
-DH 设置里新增 "ComfyUI" 分区：改服务器地址、API Key 环境变量名、数据目录、资产上限、测试连接，并可切换插件界面语言（中文 / English——存于浏览器，作用于整个插件 UI），无需改动 `cordis.yml`。
+DH 设置里新增 "ComfyUI" 分区：改服务器地址（`baseUrl`）、API Key 环境变量名（`apiKeyEnv`）、媒体访问地址（`mediaHost`）、测试连接，并可切换插件界面语言（中文 / English——存于浏览器，作用于整个插件 UI），无需改动 `cordis.yml`。数据目录与资产上限只通过 `cordis.yml` 配置，不在设置页暴露。
 
 <p align="center"><img src="images/settings.png" width="70%" alt="ComfyUI 设置页（含界面语言切换）" title="ComfyUI 设置页（含界面语言切换）" /></p>
 
@@ -98,17 +98,25 @@ ComfyUI 分两层：
 
 ## 环境要求
 
-- DeepSeek Harness（web profile）—— 本插件面向 `web` profile（`@deepseek-ai/dsh-web-app` ≥ 0.1.0-rc.6）。
+- DeepSeek Harness（web / desktop profile）—— 本插件面向 `web` 与 `desktop` profile（web 端要求 `@deepseek-ai/dsh-web-app` ≥ 0.1.0-rc.6）。
 - 一个运行中的 [ComfyUI](https://github.com/comfystack/ComfyUI) 服务器（默认 `http://127.0.0.1:8188`）。
 - 使用 `video` 模板需要 [ComfyUI-WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper) 自定义节点和 Wan 2.1 模型文件。
 
 ## 安装
 
+Web 端（web profile）：
+
 ```sh
 dsh plugin --profile web add dsh-comfyui
 ```
 
-然后重启 Web 服务（Host 端行在启动时挂载）。侧边栏轨道出现面板入口，设置页出现 "ComfyUI" 分区，Agent 立即获得 `comfyui_run`、`comfyui_object_info`、`comfyui_workflow` 与 `dsh-comfyui-workflows` skill。
+桌面端（desktop profile）：
+
+```sh
+dsh plugin --profile desktop add dsh-comfyui
+```
+
+然后重启对应应用（Web 服务或桌面端；Host 端行在启动时挂载）。侧边栏轨道出现面板入口，设置页出现 "ComfyUI" 分区，Agent 立即获得 `comfyui_run`、`comfyui_object_info`、`comfyui_workflow` 与 `dsh-comfyui-workflows` skill。
 
 ### API Key（远程服务器）
 
@@ -137,10 +145,11 @@ Agent 会选用模板，或用 `comfyui_object_info` 探查你的服务器，或
   config:
     baseUrl: http://127.0.0.1:8188
     apiKeyEnv: COMFYUI_API_KEY
-    timeoutMs: 180000
+    timeoutMs: 900000
     maxMediaItems: 12
     dataDir: ''
     maxAssets: 200
+    mediaHost: ''
 ```
 
 | 键 | 默认值 | 说明 |
@@ -148,14 +157,15 @@ Agent 会选用模板，或用 `comfyui_object_info` 探查你的服务器，或
 | `baseUrl` | `http://127.0.0.1:8188` | ComfyUI HTTP 服务器地址 |
 | `apiKeyEnv` | `COMFYUI_API_KEY` | 可选 API Key 的环境变量/凭据名 |
 | `connectTimeoutMs` | `10000` | 单次请求连接/读取超时 |
-| `timeoutMs` | `180000` | 同步生成的等待预算（视频请调大） |
+| `timeoutMs` | `900000` | 同步生成的等待预算（15 分钟；视频请调大） |
 | `pollIntervalMs` | `1000` | 等待完成时的历史轮询间隔 |
 | `maxMediaItems` | `12` | 每个工作流最多返回的媒体条数 |
 | `maxMediaBytes` | `67108864` | 媒体代理单文件流式传输上限（字节） |
 | `dataDir` | *（DSH 数据目录）* | 工作流库与资产索引存放位置（默认 `$DSH_HOME/data/dsh-comfyui`） |
 | `maxAssets` | `200` | 资产索引最多保留的条数 |
+| `mediaHost` | `''`（自动检测） | 生成媒体的外网访问基址（如 `http://192.168.1.5:3080`）；留空自动使用浏览器实际访问本服务器的地址 |
 
-## Roadmap 与设计边界（v0.2）
+## Roadmap 与设计边界
 
 本阶段确认的范围决策：
 
