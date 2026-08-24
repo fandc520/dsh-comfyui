@@ -1,6 +1,8 @@
 node_modules/
-lib/
-client/
+# Build output at the repo root only — an unanchored "client/" also matched
+# src/client/, which quietly left the whole browser-side source untracked.
+/lib/
+/client/
 *.tsbuildinfo
 # 本地维护笔记，不对外发布/追踪
 DEVELOPMENT.md

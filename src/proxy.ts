@@ -74,12 +74,25 @@ export function mountComfyUIProxy(ctx: Context, runtime: ComfyUIRuntime): (() =>
           nodeOutput?.videos,
           nodeOutput?.gifs,
         ]
-        const ref = collections
+        let ref = collections
           .flatMap((items) => items ?? [])
           [index]
         if (ref === undefined) {
-          sendJson(response, 404, { error: `no media item ${node}[${index}] for prompt ${prompt} (history may be evicted)` })
-          return
+          // ComfyUI's /history is in-memory: a server restart or a "clear
+          // history" click drops the entry and this lookup fails even though
+          // the file is still on disk. The plugin's own asset index keeps the
+          // file reference for every run it submitted, so fall back to it —
+          // this is what keeps older chat cards (whose URLs were minted before
+          // the proxy addressed files directly) from going blank.
+          const archived = await runtime.listAssets()
+          const item = archived
+            .find((asset) => asset.promptId === prompt)
+            ?.media.find((entry) => entry.node === node && entry.index === index)
+          if (item === undefined) {
+            sendJson(response, 404, { error: `no media item ${node}[${index}] for prompt ${prompt} (history evicted and not in the asset index)` })
+            return
+          }
+          ref = { filename: item.filename, subfolder: item.subfolder, type: item.type }
         }
         const { bytes, contentType } = await client.fetchView(ref)
         response.writeHead(200, {

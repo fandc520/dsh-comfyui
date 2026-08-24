@@ -26,6 +26,11 @@ export const Config = z.object({
   maxAssets: z.number().min(1).max(10_000).default(200),
   /** External base URL for generated media (e.g. http://192.168.1.5:3080). Empty = auto-detect the browser's request host, then http://127.0.0.1:<webServerPort>. */
   mediaHost: z.string().default(''),
+  /** ComfyUI's output directory on this machine, used to delete asset files
+   * from the panel. Empty = infer it from the file paths ComfyUI reports;
+   * deletion falls back to removing the index record when neither works
+   * (e.g. a ComfyUI running on another host). */
+  outputDir: z.string().default(''),
 })
 
 export type Config = {
@@ -49,4 +54,6 @@ export type Config = {
   maxAssets: number
   /** External base URL for generated media; empty auto-detects the request host. */
   mediaHost: string
+  /** ComfyUI's output directory on this machine; empty infers it from reported file paths. */
+  outputDir: string
 }

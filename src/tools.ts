@@ -9,7 +9,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Config } from './config.js'
 import { ComfyUIClient, collectMedia } from './comfyui.js'
 import { TEMPLATES, findTemplate, cloneWorkflow, applyTemplateInputs } from './templates.js'
-import type { AssetRecord, StoredWorkflow } from './store.js'
+import type { AssetRecord, LoadSlot, StoredWorkflow } from './store.js'
 import type { GraphAnalysis } from './analyze.js'
 import type { RunProgress } from './progress.js'
 import type { QueuedRun } from './queue.js'
@@ -79,12 +79,15 @@ export interface ComfyUIRuntime {
   lookupMediaHash(hash: string): Promise<string | undefined>
   /** Record a content hash → file name pair for dedup. */
   saveMediaHash(hash: string, name: string): Promise<void>
-  /** The load-area selection (default source image for image-to-image). */
-  loadCurrentImage(): Promise<{ name: string; kind: 'image' | 'video' | 'audio'; source: 'imported' | 'generated' } | undefined>
-  /** Persist the load-area selection. */
-  saveCurrentImage(image: { name: string; kind: 'image' | 'video' | 'audio'; source: 'imported' | 'generated' }): Promise<void>
+  /** The load-area slots, in order; `null` is an empty slot the user added.
+   * Filled slots are the default source media for loader parameters. */
+  loadSlots(): Promise<Array<LoadSlot>>
+  /** Persist the load-area slots. */
+  saveSlots(slots: Array<LoadSlot>): Promise<void>
   /** The asset index (newest first). */
   listAssets(): Promise<AssetRecord[]>
+  /** Remove one asset record from the index, returning what was removed. */
+  deleteAsset(promptId: string): Promise<AssetRecord | undefined>
   /** Move completed tracked runs into the asset index. */
   sweep(): Promise<AssetRecord[]>
   /** Workflows the user saved on the ComfyUI server, with extract status. */
@@ -499,8 +502,9 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
       render(_args, value) {
         const data = value as {
           action: string
-          workflows?: Array<{ id: string; name: string; description: string; parameters?: Array<{ name: string; label: string; type: string; default?: string | number | boolean; random?: boolean; options?: Array<string | number>; upload?: 'image' | 'video' | 'audio' | 'media'; subfolder?: string }> }>
+          workflows?: Array<{ id: string; name: string; description: string; parameters?: Array<{ name: string; label: string; type: string; default?: string | number | boolean; random?: boolean; numberKind?: 'int' | 'float'; options?: Array<string | number>; upload?: 'image' | 'video' | 'audio' | 'media'; subfolder?: string }> }>
           comfyuiWorkflows?: Array<{ name: string; extracted: boolean; derived: Array<{ libraryId: string; name: string }> }>
+          loadArea?: { slots: number; loaded: number; items: Array<{ name: string; kind: string; source: string }> }
           result?: RunResult
           id?: string
           name?: string
@@ -524,6 +528,13 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
                 ? `，上传类型: ${param.upload}${param.upload === 'media' ? `（${param.subfolder ?? ''}/，空值=移除该参考位）` : ''}`
                 : ''
               lines.push(`  ${param.name}(${param.label}${param.random === true ? '，随机' : ''}，默认 ${def}${options}${upload})`)
+            }
+          }
+          const loadArea = data.loadArea
+          if (loadArea !== undefined && loadArea.slots > 0) {
+            lines.push(`用户加载区（${loadArea.slots} 个加载位，已放入 ${loadArea.loaded} 个素材，未显式传值的加载参数按顺序取用）:`)
+            for (const [index, item] of loadArea.items.entries()) {
+              lines.push(`  ${index + 1}. ${item.name}（${item.kind}）`)
             }
           }
           const comfyui = data.comfyuiWorkflows ?? []
@@ -556,21 +567,34 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
         throw new Error(`comfyui_workflow: action must be list, run, or get, got ${String(action)}`)
       }
       if (action === 'list') {
-        const [workflows, comfyui] = await Promise.all([
+        const [workflows, comfyui, slots] = await Promise.all([
           runtime.listWorkflows(),
           runtime.listComfyWorkflows().catch(() => []),
+          runtime.loadSlots().catch(() => [] as LoadSlot[]),
         ])
+        // What the user currently has loaded in the panel's load area. Unset
+        // loader parameters take these files in slot order, so the model can
+        // see how many references a run will pick up without asking.
+        const loaded = slots.filter((slot): slot is NonNullable<LoadSlot> => slot !== null)
         return {
           action: 'list',
+          loadArea: {
+            slots: slots.length,
+            loaded: loaded.length,
+            items: loaded.map(({ name, kind, source }) => ({ name, kind, source })),
+          },
           workflows: workflows.map(({ id, name, description, parameters, updatedAt }) => ({
             id,
             name,
             description,
-            parameters: (parameters ?? []).map(({ name: pname, label, type, default: def, random, options, upload }) => {
+            parameters: (parameters ?? []).map(({ name: pname, label, type, default: def, random, numberKind, options, upload }) => {
               // DSH validates tool output as lossless JSON: JSON.stringify drops
               // undefined keys, so omit optional fields instead of passing undefined.
               const entry: Record<string, unknown> = { name: pname, label, type, default: def }
               if (random !== undefined) entry.random = random
+              // Tells the model whether decimals are accepted; absent means the
+              // node's declared type is unknown and a float is safe.
+              if (numberKind !== undefined) entry.numberKind = numberKind
               if (options !== undefined) entry.options = options
               if (upload !== undefined) entry.upload = upload
               return entry

@@ -100,6 +100,7 @@ export async function apply(ctx: Context, entryConfig: Partial<ConfigType>): Pro
     dataDir: entryConfig.dataDir !== undefined && entryConfig.dataDir !== '' ? entryConfig.dataDir : defaultDataDir(),
     maxAssets: entryConfig.maxAssets ?? 200,
     mediaHost: entryConfig.mediaHost ?? '',
+    outputDir: entryConfig.outputDir ?? '',
   }
 
   const store = new ComfyUIStore(resolved.dataDir, resolved.maxAssets)
@@ -168,8 +169,9 @@ export async function apply(ctx: Context, entryConfig: Partial<ConfigType>): Pro
       let prompt = workflow as unknown as Workflow
       if (meta.parameters !== undefined && meta.parameters.length > 0) {
         const objectInfo = await objectInfoCached(client)
-        const current = await store.loadCurrentImage()
-        prompt = applyWorkflowParameters(prompt, meta.parameters, meta.values ?? {}, objectInfo, await store.loadMediaSizes(), current?.name)
+        const slots = await store.loadSlots()
+        const loaded = slots.filter((slot): slot is NonNullable<typeof slot> => slot !== null)
+        prompt = applyWorkflowParameters(prompt, meta.parameters, meta.values ?? {}, objectInfo, await store.loadMediaSizes(), loaded)
       }
       const extraData: Record<string, unknown> = {}
       if (meta.workflowId !== undefined && meta.workflowId !== null && meta.workflowName !== null) {
@@ -191,9 +193,10 @@ export async function apply(ctx: Context, entryConfig: Partial<ConfigType>): Pro
     saveMediaSize: (name, size) => store.saveMediaSize(name, size),
     lookupMediaHash: (hash) => store.lookupMediaHash(hash),
     saveMediaHash: (hash, name) => store.saveMediaHash(hash, name),
-    loadCurrentImage: () => store.loadCurrentImage(),
-    saveCurrentImage: (image) => store.saveCurrentImage(image),
+    loadSlots: () => store.loadSlots(),
+    saveSlots: (slots) => store.saveSlots(slots),
     listAssets: () => store.listAssets(),
+    deleteAsset: (promptId) => store.deleteAsset(promptId),
     sweep: async () => {
       const client = runtime.createClient(await resolveApiKey(ctx, resolved.apiKeyEnv))
       return tracker.sweep({ client, store, maxItems: resolved.maxMediaItems, proxyBase: runtime.proxyBase() })

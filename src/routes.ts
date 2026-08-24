@@ -8,9 +8,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { errorMessage, readJsonBody, readRawBody, sameOrigin, sendJson } from './http.js'
 import type { ComfyUIRuntime } from './tools.js'
-import { analyzeWorkflowParameters, comboChildInfo, inputOptions, uploadKindOf, type Workflow } from './params.js'
-import { collectMedia, historyErrorMessage, type ComfyUIMediaRef } from './comfyui.js'
+import { analyzeWorkflowParameters, comboChildInfo, inputOptions, numberSpecOf, uploadKindOf, type Workflow } from './params.js'
+import { collectMedia, historyErrorMessage, mediaProxyUrl, type ComfyUIMediaRef } from './comfyui.js'
 import type { AssetRecord } from './store.js'
+import { unlink } from 'node:fs/promises'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 /** One selectable item in the load-area picker. */
 interface LoadAreaFile {
@@ -22,6 +24,98 @@ interface LoadAreaFile {
   workflowName?: string | null
   width?: number
   height?: number
+}
+
+/**
+ * Rebuild an asset's media URLs from the stored file references.
+ *
+ * Records written before the media proxy addressed files directly carry
+ * prompt/node/index URLs, which only resolve while ComfyUI still has that run
+ * in its in-memory /history — a server restart or a "clear history" click
+ * makes every one of them 404 ("source file evicted"), even though the files
+ * are untouched in the output directory. Healing them on read fixes the whole
+ * back catalogue without rewriting the stored index.
+ */
+function healAssetUrls(assets: AssetRecord[]): AssetRecord[] {
+  return assets.map((asset) => ({
+    ...asset,
+    media: asset.media.map((item) => (
+      item.filename === '' ? item : { ...item, url: mediaProxyUrl(item) }
+    )),
+  }))
+}
+
+/**
+ * Where ComfyUI writes its outputs on this machine.
+ *
+ * ComfyUI has no API that deletes an output file (its own asset routes only
+ * soft-delete a database row and keep the content), so removing a generated
+ * file means touching the filesystem directly. The configured `outputDir`
+ * wins; otherwise it is inferred from the absolute path some nodes report
+ * with their results (`fullpath`), by stripping the subfolder/filename tail
+ * the record already carries. When neither is available — a ComfyUI on
+ * another host, for instance — deletion degrades to dropping the index
+ * record and says so.
+ */
+function resolveOutputDir(configured: string, assets: AssetRecord[]): string | undefined {
+  if (configured !== '' && isAbsolute(configured)) return resolve(configured)
+  for (const asset of assets) {
+    for (const item of asset.media) {
+      const full = (item as { fullpath?: unknown }).fullpath
+      if (typeof full !== 'string' || full === '' || item.filename === '') continue
+      const tail = item.subfolder !== '' ? `${item.subfolder}/${item.filename}` : item.filename
+      const normalized = full.replace(/\\/g, '/')
+      if (!normalized.endsWith(tail)) continue
+      const root = normalized.slice(0, normalized.length - tail.length).replace(/[/]+$/, '')
+      if (root !== '') return resolve(root)
+    }
+  }
+  return undefined
+}
+
+/** Delete one generated file under the output directory. Returns 'deleted',
+ * 'missing' (already gone — the record still goes), or 'skipped' when the
+ * reference does not resolve inside the output directory. */
+async function deleteOutputFile(outputDir: string, ref: { filename: string; subfolder: string; type: string }): Promise<'deleted' | 'missing' | 'skipped'> {
+  // 'temp' and 'input' live in sibling directories that this mapping does not
+  // cover; only outputs are ours to remove.
+  if (ref.filename === '' || (ref.type !== '' && ref.type !== 'output')) return 'skipped'
+  const target = resolve(join(outputDir, ref.subfolder, ref.filename))
+  // Path-traversal guard: a crafted subfolder/filename must not reach outside.
+  const rel = relative(outputDir, target)
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel) || rel.split(sep).includes('..')) return 'skipped'
+  try {
+    await unlink(target)
+    return 'deleted'
+  } catch (error) {
+    if ((error as { code?: string }).code === 'ENOENT') return 'missing'
+    throw error
+  }
+}
+
+const VIDEO_EXT = /\.(mp4|webm|mov|mkv|avi|m4v)$/i
+const AUDIO_EXT = /\.(mp3|wav|ogg|flac|m4a|aac|opus)$/i
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|tiff?|avif)$/i
+
+/** The media kind of a file name, falling back to the loader's own kind when
+ * the extension says nothing. */
+function mediaKindOfName(name: string, fallback: 'image' | 'video' | 'audio'): 'image' | 'video' | 'audio' {
+  if (VIDEO_EXT.test(name)) return 'video'
+  if (AUDIO_EXT.test(name)) return 'audio'
+  if (IMAGE_EXT.test(name)) return 'image'
+  return fallback
+}
+
+/** The file-picker input key of a loader node class, taken from its
+ * object_info upload flag (image_upload / video_upload / audio_upload) so a
+ * renamed key does not silently empty the load area. */
+function loaderInputKey(objectInfo: Record<string, unknown> | undefined, classType: string): string | undefined {
+  const def = objectInfo?.[classType] as { input?: { required?: Record<string, unknown>; optional?: Record<string, unknown> } } | undefined
+  const inputs = { ...def?.input?.required, ...def?.input?.optional }
+  for (const key of Object.keys(inputs)) {
+    if (uploadKindOf(objectInfo, classType, key) !== undefined) return key
+  }
+  return undefined
 }
 
 function generatedUrlOf(assets: AssetRecord[], name: string): string | undefined {
@@ -260,7 +354,10 @@ export function mountComfyUIRoutes(ctx: Context, runtime: ComfyUIRuntime): (() =
         ? comboChildInfo(objectInfo, classType, inputKey, body.parentValue)
         : undefined
       const upload = uploadKindOf(objectInfo, classType, inputKey)
-      sendJson(response, 200, { ok: true, options: options ?? [], child, upload })
+      // Declared INT/FLOAT type: the editor uses it to allow (or round away)
+      // decimals instead of assuming every number input is an integer.
+      const number = numberSpecOf(objectInfo, classType, inputKey)
+      sendJson(response, 200, { ok: true, options: options ?? [], child, upload, number })
     }),
   }))
 
@@ -274,28 +371,38 @@ export function mountComfyUIRoutes(ctx: Context, runtime: ComfyUIRuntime): (() =
       }
       try {
         const client = runtime.createClient(await runtime.getApiKey())
-        const [objectInfo, current, assets, sizes] = await Promise.all([
+        const [objectInfo, slots, assets, sizes] = await Promise.all([
           client.objectInfo().catch(() => undefined),
-          runtime.loadCurrentImage(),
-          runtime.listAssets(),
+          runtime.loadSlots(),
+          runtime.listAssets().then(healAssetUrls),
           runtime.listMediaSizes(),
         ])
         const files: LoadAreaFile[] = []
         const seen = new Set<string>()
-        // imported: files visible to the ComfyUI loader nodes (input dir)
-        const loaderSpecs: Array<[string, string, LoadAreaFile['kind']]> = [
-          ['LoadImage', 'image', 'image'],
-          ['LoadVideo', 'video', 'video'],
-          ['LoadAudio', 'audio', 'audio'],
+        // imported: files visible to the ComfyUI loader nodes (input dir).
+        // The input key is read from object_info rather than hard-coded —
+        // LoadImage calls it "image", LoadVideo "file", LoadAudio "audio",
+        // and guessing wrong silently drops that whole media type from the
+        // load area (which is what happened to video).
+        const loaderSpecs: Array<[string, LoadAreaFile['kind']]> = [
+          ['LoadImage', 'image'],
+          ['LoadVideo', 'video'],
+          ['LoadAudio', 'audio'],
         ]
-        for (const [classType, inputKey, kind] of loaderSpecs) {
+        for (const [classType, fallbackKind] of loaderSpecs) {
+          const inputKey = loaderInputKey(objectInfo, classType)
+          if (inputKey === undefined) continue
           for (const option of inputOptions(objectInfo, classType, inputKey) ?? []) {
             const name = String(option)
             if (seen.has(name)) continue
             seen.add(name)
             files.push({
+              // Classify by extension first: ComfyUI lists an .mp4 under
+              // LoadAudio too (it can pull the audio track), and whichever
+              // loader happened to be scanned first would otherwise decide
+              // the file's type in the picker.
               name,
-              kind,
+              kind: mediaKindOfName(name, fallbackKind),
               source: 'imported',
               url: `/comfyui/media?file=${encodeURIComponent(name)}&type=input`,
               width: sizes[name]?.width,
@@ -318,21 +425,25 @@ export function mountComfyUIRoutes(ctx: Context, runtime: ComfyUIRuntime): (() =
             })
           }
         }
-        let currentEntry: LoadAreaFile | null = null
-        if (current !== undefined) {
-          const url = current.source === 'generated'
-            ? generatedUrlOf(assets, current.name) ?? `/comfyui/media?file=${encodeURIComponent(current.name)}&type=output`
-            : `/comfyui/media?file=${encodeURIComponent(current.name)}&type=input`
-          currentEntry = {
-            name: current.name,
-            kind: current.kind,
-            source: current.source,
+        // Every slot in order; `null` entries are empty slots the user added.
+        const slotEntries: Array<LoadAreaFile | null> = slots.map((slot) => {
+          if (slot === null) return null
+          const url = slot.source === 'generated'
+            ? generatedUrlOf(assets, slot.name) ?? `/comfyui/media?file=${encodeURIComponent(slot.name)}&type=output`
+            : `/comfyui/media?file=${encodeURIComponent(slot.name)}&type=input`
+          return {
+            name: slot.name,
+            kind: slot.kind,
+            source: slot.source,
             url,
-            width: sizes[current.name]?.width,
-            height: sizes[current.name]?.height,
+            width: sizes[slot.name]?.width,
+            height: sizes[slot.name]?.height,
           }
-        }
-        sendJson(response, 200, { ok: true, current: currentEntry, files })
+        })
+        // `current` stays in the payload as the first filled slot: it is the
+        // primary source image, and older clients read only this field.
+        const currentEntry = slotEntries.find((entry): entry is LoadAreaFile => entry !== null) ?? null
+        sendJson(response, 200, { ok: true, current: currentEntry, slots: slotEntries, files })
       } catch (error) {
         sendJson(response, 500, { error: errorMessage(error) })
       }
@@ -349,27 +460,77 @@ export function mountComfyUIRoutes(ctx: Context, runtime: ComfyUIRuntime): (() =
       }
       const body = await readSameOriginPost(request, response)
       if (body === undefined) return
-      const name = typeof body.name === 'string' && body.name !== '' ? body.name : ''
-      const kind = body.kind === 'video' ? 'video' : body.kind === 'audio' ? 'audio' : 'image'
-      const source = body.source === 'generated' ? 'generated' : 'imported'
-      if (name === '') {
-        sendJson(response, 400, { error: 'name is required' })
-        return
-      }
+      // Slot operations of the load area. `pick` (the default, and the body
+      // shape older clients send) puts a file into a slot; the others manage
+      // the slots themselves.
+      const action = typeof body.action === 'string' ? body.action : 'pick'
+      const slots = await runtime.loadSlots()
+      const index = typeof body.index === 'number' && Number.isInteger(body.index) && body.index >= 0
+        ? body.index
+        : undefined
       try {
-        if (source === 'generated') {
-          // Generated outputs live in ComfyUI's output dir; copy the selected
-          // one into the input dir (same name) so loader nodes can use it.
-          const assets = await runtime.listAssets()
-          const ref = findOutputRef(assets, name)
-          if (ref !== undefined) {
-            const client = runtime.createClient(await runtime.getApiKey())
-            const { bytes, contentType } = await client.fetchView(ref)
-            await client.uploadFile(bytes, contentType)
+        switch (action) {
+          case 'addSlot':
+            slots.push(null)
+            break
+          case 'clear': {
+            // "清除素材": the slot stays, its file is dropped.
+            if (index === undefined || index >= slots.length) {
+              sendJson(response, 400, { error: 'index is required and must point at an existing slot' })
+              return
+            }
+            slots[index] = null
+            break
           }
+          case 'removeSlot': {
+            // "删除加载区": the slot itself goes away.
+            if (index === undefined || index >= slots.length) {
+              sendJson(response, 400, { error: 'index is required and must point at an existing slot' })
+              return
+            }
+            slots.splice(index, 1)
+            break
+          }
+          case 'pick': {
+            const name = typeof body.name === 'string' ? body.name : ''
+            if (name === '') {
+              sendJson(response, 400, { error: 'name is required' })
+              return
+            }
+            const kind = body.kind === 'video' ? 'video' : body.kind === 'audio' ? 'audio' : 'image'
+            const source = body.source === 'generated' ? 'generated' : 'imported'
+            // No index: fill the first empty slot, or open a new one. This is
+            // what the picker sends when the user adds material to the load
+            // area without targeting a particular slot. Resolve and validate
+            // the target before copying anything, so a bad index cannot leave
+            // a file copied into ComfyUI with no slot to show for it.
+            const firstEmpty = slots.findIndex((slot) => slot === null)
+            const target = index ?? (firstEmpty === -1 ? slots.length : firstEmpty)
+            if (target > slots.length) {
+              sendJson(response, 400, { error: 'index is out of range' })
+              return
+            }
+            if (source === 'generated') {
+              // Generated outputs live in ComfyUI's output dir; copy the
+              // selected one into the input dir (same name) so loader nodes
+              // can use it.
+              const assets = await runtime.listAssets()
+              const ref = findOutputRef(assets, name)
+              if (ref !== undefined) {
+                const client = runtime.createClient(await runtime.getApiKey())
+                const { bytes, contentType } = await client.fetchView(ref)
+                await client.uploadMedia(bytes, name, contentType)
+              }
+            }
+            slots[target] = { name, kind, source }
+            break
+          }
+          default:
+            sendJson(response, 400, { error: `unknown action "${action}"` })
+            return
         }
-        await runtime.saveCurrentImage({ name, kind, source })
-        sendJson(response, 200, { ok: true })
+        await runtime.saveSlots(slots)
+        sendJson(response, 200, { ok: true, slots: slots.length, loaded: slots.filter((slot) => slot !== null).length })
       } catch (error) {
         sendJson(response, 500, { error: errorMessage(error) })
       }
@@ -614,7 +775,67 @@ export function mountComfyUIRoutes(ctx: Context, runtime: ComfyUIRuntime): (() =
       // Sweep completed tracked runs into the index before listing, so the
       // panel sees results as soon as the next poll lands.
       await runtime.sweep()
-      sendJson(response, 200, { ok: true, assets: await runtime.listAssets() })
+      sendJson(response, 200, { ok: true, assets: healAssetUrls(await runtime.listAssets()) })
+    }),
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/comfyui/assets/delete',
+    handler: withHint(async (request, response) => {
+      if (!methodIs(request, 'POST')) {
+        sendJson(response, 405, { error: 'method not allowed' })
+        return
+      }
+      const body = await readSameOriginPost(request, response)
+      if (body === undefined) return
+      const promptId = typeof body.promptId === 'string' ? body.promptId : ''
+      if (promptId === '') {
+        sendJson(response, 400, { error: 'promptId is required' })
+        return
+      }
+      try {
+        // Resolve the output directory from the index *before* the record is
+        // removed: the path hint may live on the very record being deleted.
+        const assets = await runtime.listAssets()
+        const outputDir = resolveOutputDir(runtime.getConfig().outputDir, assets)
+        const removed = await runtime.deleteAsset(promptId)
+        if (removed === undefined) {
+          sendJson(response, 404, { error: `asset ${promptId} not found` })
+          return
+        }
+        let deleted = 0
+        let missing = 0
+        let skipped = 0
+        const failures: string[] = []
+        if (outputDir !== undefined) {
+          for (const item of removed.media) {
+            try {
+              const result = await deleteOutputFile(outputDir, { filename: item.filename, subfolder: item.subfolder, type: item.type })
+              if (result === 'deleted') deleted += 1
+              else if (result === 'missing') missing += 1
+              else skipped += 1
+            } catch (error) {
+              // The record is already gone; report which files survived it.
+              failures.push(`${item.filename}: ${errorMessage(error)}`)
+            }
+          }
+        } else {
+          skipped = removed.media.length
+        }
+        sendJson(response, 200, {
+          ok: true,
+          promptId,
+          files: removed.media.length,
+          deleted,
+          missing,
+          skipped,
+          outputDir: outputDir ?? null,
+          failures,
+        })
+      } catch (error) {
+        sendJson(response, 500, { error: errorMessage(error) })
+      }
     }),
   }))
 

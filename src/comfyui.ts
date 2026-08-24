@@ -168,12 +168,42 @@ export class ComfyUIClient {
   }
 
   /** Upload a file (multipart body forwarded verbatim) into ComfyUI's input directory. */
+  /** Forward a multipart/form-data upload body verbatim (the browser's own
+   * form, field "image", as ComfyUI's /upload/image expects it). */
   async uploadFile(body: Uint8Array, contentType: string): Promise<{ name?: string; subfolder?: string; type?: string }> {
     const data = await this.request<{ name?: string; subfolder?: string; type?: string }>('/upload/image', {
       method: 'POST',
       headers: { 'content-type': contentType },
       body,
     })
+    return data ?? {}
+  }
+
+  /**
+   * Put one file into ComfyUI's input directory (images, video, audio alike).
+   *
+   * /upload/image only accepts multipart/form-data: posting the bytes as a
+   * raw body with their own content-type answers HTTP 400, which is why
+   * picking a generated file into the load area used to fail instead of
+   * copying it. The form is built here so callers can pass plain bytes.
+   * `overwrite` keeps a repeated pick from piling up "name (1).png" copies.
+   */
+  async uploadMedia(
+    bytes: Uint8Array,
+    filename: string,
+    contentType: string,
+    opts: { overwrite?: boolean; subfolder?: string; timeoutMs?: number } = {},
+  ): Promise<{ name?: string; subfolder?: string; type?: string }> {
+    const form = new FormData()
+    form.append('image', new Blob([bytes], { type: contentType !== '' ? contentType : 'application/octet-stream' }), filename)
+    form.append('overwrite', opts.overwrite === false ? 'false' : 'true')
+    if (opts.subfolder !== undefined && opts.subfolder !== '') form.append('subfolder', opts.subfolder)
+    // Video files are large; the connect timeout is far too tight for them.
+    const data = await this.request<{ name?: string; subfolder?: string; type?: string }>(
+      '/upload/image',
+      { method: 'POST', body: form },
+      opts.timeoutMs ?? Math.max(this.connectTimeoutMs, 120_000),
+    )
     return data ?? {}
   }
 
@@ -442,17 +472,33 @@ export function historyErrorMessage(promptId: string, entry: ComfyUIHistoryEntry
 }
 
 /**
+ * Build the same-origin proxy URL for one media file.
+ *
+ * The file is addressed by its own name/subfolder/type rather than by
+ * prompt+node+index: the latter has to be resolved through ComfyUI's
+ * /history, which lives in memory and is dropped on server restart or a
+ * "clear history" click — after which every stored asset URL 404s even though
+ * the file is still sitting in the output directory. Addressing the file
+ * directly keeps old assets viewable for as long as the file exists.
+ */
+export function mediaProxyUrl(ref: ComfyUIMediaRef, proxyBase?: string): string {
+  const query = new URLSearchParams({ file: ref.filename, subfolder: ref.subfolder ?? '', type: ref.type ?? 'output' })
+  return `${proxyBase ?? ''}/comfyui/media?${query.toString()}`
+}
+
+/**
  * Collect media items from a completed history entry, in node/output order,
  * capped by maxItems. The URL is the same-origin proxy route when a web
- * server is present, otherwise a ComfyUI /view URL (for headless hosts).
+ * server is present, otherwise the bare filename (for headless hosts).
  */
 export function collectMedia(opts: {
+  /** The run these outputs belong to; kept for call-site clarity and logging. */
   promptId: string
   entry: ComfyUIHistoryEntry
   maxItems: number
   proxyBase: string | undefined
 }): ComfyUIMediaItem[] {
-  const { promptId, entry, maxItems, proxyBase } = opts
+  const { entry, maxItems, proxyBase } = opts
   const items: ComfyUIMediaItem[] = []
   const AUDIO_EXT = /\.(mp3|wav|ogg|flac|m4a|aac|opus)$/i
   const VIDEO_EXT = /\.(mp4|webm|mov|mkv|avi)$/i
@@ -469,13 +515,12 @@ export function collectMedia(opts: {
         // Some nodes emit audio/video filenames through the image/video
         // arrays; classify them by extension so the card renders a player.
         const itemKind = AUDIO_EXT.test(ref.filename) ? 'audio' : VIDEO_EXT.test(ref.filename) ? 'video' : kind
-        const query = new URLSearchParams({ prompt: promptId, node, index: String(index) })
         items.push({
           ...ref,
           node,
           index,
           kind: itemKind,
-          url: proxyBase !== undefined ? `${proxyBase}/comfyui/media?${query.toString()}` : ref.filename,
+          url: proxyBase !== undefined ? mediaProxyUrl(ref, proxyBase) : ref.filename,
         })
       }
     }

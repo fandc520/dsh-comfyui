@@ -27,6 +27,17 @@ export interface WorkflowParameter {
   description?: string
   /** Number parameters (seeds): randomize on every run when true. */
   random?: boolean
+  /** Number parameters: the numeric type object_info declares for the input.
+   * 'int' is rounded on apply; 'float' takes decimals. Absent means the
+   * declaration was unavailable (no object_info, unregistered node, ambiguous
+   * union type) — decimals are then accepted as-is, since a float value is
+   * the safe superset. */
+  numberKind?: 'int' | 'float'
+  /** Declared numeric bounds and step from object_info (editor hints only —
+   * values are not clamped, ComfyUI validates them at queue time). */
+  min?: number
+  max?: number
+  step?: number
   /** Allowed values when the node input is a dropdown (object_info combo). */
   options?: Array<string | number>
   /** Loader-node inputs (LoadImage/LoadVideo/LoadAudio): the value is a
@@ -58,6 +69,24 @@ const TEXT_KEYS = new Set(['text', 'value', 'prompt'])
 
 function isPrimitive(value: unknown): value is string | number | boolean {
   return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+}
+
+/** Read a boolean parameter's value, accepting the string and 0/1 spellings.
+ *
+ * A boolean default authored before the panel had a checkbox was stored as a
+ * string ("true"), and an agent may pass "false" or 0 just as readily. Writing
+ * any of those into a BOOLEAN node input would make ComfyUI reject the prompt
+ * (and "false" would read as truthy), so they are normalized here; anything
+ * that is not a recognized spelling returns undefined and the input keeps its
+ * authored value. */
+function coerceBoolean(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value === 1 ? true : value === 0 ? false : undefined
+  if (typeof value !== 'string') return undefined
+  const text = value.trim().toLowerCase()
+  if (text === 'true' || text === '1' || text === 'yes' || text === 'on') return true
+  if (text === 'false' || text === '0' || text === 'no' || text === 'off') return false
+  return undefined
 }
 
 /** Parse a media-state JSON array (MiniMaxH3 loader media_state); undefined when not one. */
@@ -110,6 +139,52 @@ function displayName(workflow: Workflow, nodeId: string, inputKey: string): stri
   if (node === undefined) return inputKey
   if (TEXT_CLASSES.has(node.class_type)) return inputKey === 'value' ? '文本' : '提示词'
   return `${node.class_type} · ${inputKey}`
+}
+
+/** The raw object_info spec tuple for one input of a node class. */
+function inputSpec(
+  objectInfo: Record<string, unknown> | undefined,
+  classType: string,
+  inputKey: string,
+): unknown[] | undefined {
+  if (objectInfo === undefined) return undefined
+  const def = objectInfo[classType] as { input?: { required?: Record<string, unknown>; optional?: Record<string, unknown> } } | undefined
+  const spec = def?.input?.required?.[inputKey] ?? def?.input?.optional?.[inputKey]
+  return Array.isArray(spec) ? spec : undefined
+}
+
+/** The numeric type and bounds object_info declares for an input, if any.
+ *
+ * ComfyUI writes `["INT", {default,min,max,...}]` / `["FLOAT", {..., step,
+ * round}]`, and a few nodes use decorated or union type names (`"INT:seed"`,
+ * `"INT,FLOAT"`). A union that admits FLOAT is reported as float, because a
+ * float value is accepted wherever an int one is but not the reverse.
+ * Everything else returns undefined: the caller then treats the parameter as
+ * an unconstrained number (decimals allowed, no rounding). */
+export function numberSpecOf(
+  objectInfo: Record<string, unknown> | undefined,
+  classType: string,
+  inputKey: string,
+): { kind: 'int' | 'float'; min?: number; max?: number; step?: number } | undefined {
+  const spec = inputSpec(objectInfo, classType, inputKey)
+  if (spec === undefined) return undefined
+  const typeName = spec[0]
+  if (typeof typeName !== 'string') return undefined
+  // "INT:seed" → INT; "INT,FLOAT" → the union members.
+  const names = typeName.split(',').map((name) => name.split(':')[0]?.trim().toUpperCase() ?? '')
+  const hasFloat = names.includes('FLOAT')
+  const hasInt = names.includes('INT')
+  if (!hasFloat && !hasInt) return undefined
+  const meta = spec[1]
+  const flags = meta !== null && typeof meta === 'object' ? meta as Record<string, unknown> : {}
+  const numberOf = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isFinite(value) ? value : undefined
+  return {
+    kind: hasFloat ? 'float' : 'int',
+    min: numberOf(flags.min),
+    max: numberOf(flags.max),
+    step: numberOf(flags.step),
+  }
 }
 
 /** The object_info input spec for one input name of a node class, if declared. */
@@ -306,6 +381,11 @@ export function analyzeWorkflowParameters(workflow: Workflow, objectInfo?: Recor
     const options = input.options ?? (input.classType !== undefined
       ? inputOptions(objectInfo, input.classType, input.inputKey)
       : undefined)
+    // Number inputs carry their declared INT/FLOAT type so the panel editor
+    // and the run path know whether decimals are allowed.
+    const numberSpec = input.type === 'number' && input.classType !== undefined
+      ? numberSpecOf(objectInfo, input.classType, input.inputKey)
+      : undefined
     params.push({
       id: randomUUID(),
       name: uniqueName(input.name),
@@ -315,6 +395,10 @@ export function analyzeWorkflowParameters(workflow: Workflow, objectInfo?: Recor
       inputKey: input.inputKey,
       default: input.value,
       random: input.random,
+      numberKind: numberSpec?.kind,
+      min: numberSpec?.min,
+      max: numberSpec?.max,
+      step: numberSpec?.step,
       options,
       upload: input.upload,
       subfolder: input.subfolder,
@@ -417,17 +501,35 @@ export function applyWorkflowParameters(
   values: Record<string, unknown>,
   objectInfo?: Record<string, unknown>,
   imageSizes?: Record<string, { width: number; height: number }>,
-  defaultImage?: string,
+  loadArea?: Array<{ name: string; kind: 'image' | 'video' | 'audio' }>,
 ): Workflow {
   const copy: Workflow = structuredClone(workflow)
   let effectiveValues = values
-  // The load-area selection is the default source image: when an image upload
-  // parameter is left unset, use it instead of the workflow's stored default.
-  if (defaultImage !== undefined && typeof defaultImage === 'string' && defaultImage !== '') {
-    const imageParam = parameters.find((param) => param.upload === 'image')
-    if (imageParam !== undefined && !Object.prototype.hasOwnProperty.call(effectiveValues, imageParam.name)) {
-      effectiveValues = { ...effectiveValues, [imageParam.name]: defaultImage }
+  // The load area supplies the default source media: each loader parameter
+  // left unset takes the next load-area slot of its own kind, in slot order
+  // (slot 1 → first image parameter, slot 2 → second, and so on). A workflow
+  // with a single image parameter therefore behaves exactly as it did when
+  // the load area held one file, and an explicit value always wins.
+  if (loadArea !== undefined && loadArea.length > 0) {
+    const queues: Record<'image' | 'video' | 'audio', string[]> = { image: [], video: [], audio: [] }
+    for (const slot of loadArea) {
+      if (typeof slot?.name === 'string' && slot.name !== '') queues[slot.kind].push(slot.name)
     }
+    const filled: Record<string, unknown> = { ...effectiveValues }
+    let used = false
+    for (const param of parameters) {
+      const kind = param.upload
+      if (kind !== 'image' && kind !== 'video' && kind !== 'audio') continue
+      if (Object.prototype.hasOwnProperty.call(effectiveValues, param.name)) continue
+      // An audio parameter may also take a video slot: ComfyUI's LoadAudio
+      // accepts a video container and pulls its audio track, and the load
+      // area classifies an .mp4 as video.
+      const next = queues[kind].shift() ?? (kind === 'audio' ? queues.video.shift() : undefined)
+      if (next === undefined) continue
+      filled[param.name] = next
+      used = true
+    }
+    if (used) effectiveValues = filled
   }
   // Auto-match the output size to the source image: when the effective source
   // image (explicit or load-area default) has a recorded pixel size but
@@ -473,13 +575,36 @@ export function applyWorkflowParameters(
   for (const param of parameters) {
     const node = copy[param.nodeId]
     if (node === undefined) continue
+    const explicit = Object.prototype.hasOwnProperty.call(effectiveValues, param.name)
     let value: unknown
-    if (Object.prototype.hasOwnProperty.call(effectiveValues, param.name)) {
+    if (explicit) {
       value = effectiveValues[param.name]
     } else if (param.random === true && param.type === 'number') {
       value = Math.floor(Math.random() * 2 ** 32)
     } else {
       value = param.default
+    }
+    // A loader parameter with an empty default and nothing to fill it (no
+    // explicit value, no load-area slot of its kind) leaves the workflow's
+    // authored file name alone. Writing the empty default instead would clear
+    // the node's file input and the run would fail on a missing image.
+    // 'media' slots are exempt: there an empty value *means* "remove this
+    // reference slot", and they are merged back separately below.
+    if (!explicit && param.upload !== undefined && param.upload !== 'media' && value === '') continue
+    // A parameter exposed on a *linked* input (its authored value is a
+    // [nodeId, slot] reference, not a widget value) carries an empty default,
+    // because a link cannot be represented as one. Writing that default would
+    // sever the link on every run, so an omitted value leaves the link alone —
+    // only an explicit value replaces it.
+    if (!explicit && param.default === '' && !isPrimitive(node.inputs[param.inputKey]) && node.inputs[param.inputKey] !== undefined) continue
+    // INT inputs reject decimals at queue time; round rather than fail on a
+    // value like 20.5. The stored kind wins, but a workflow saved before the
+    // kind was recorded still gets it resolved from object_info here, so old
+    // libraries behave the same as freshly analyzed ones. An input whose type
+    // stays unknown is left exactly as the caller passed it.
+    if (param.type === 'number' && typeof value === 'number' && !Number.isInteger(value)) {
+      const kind = param.numberKind ?? numberSpecOf(objectInfo, node.class_type, param.inputKey)?.kind
+      if (kind === 'int') value = Math.round(value)
     }
     const isComboChild = comboChildKeys.has(`${param.nodeId}:${param.inputKey}`)
     // Upload parameters accept any server-side filename (uploaded files, or
@@ -489,7 +614,11 @@ export function applyWorkflowParameters(
     }
     if (param.type === 'string' && typeof value !== 'string') continue
     if (param.type === 'number' && typeof value !== 'number') continue
-    if (param.type === 'boolean' && typeof value !== 'boolean') continue
+    if (param.type === 'boolean' && typeof value !== 'boolean') {
+      const coerced = coerceBoolean(value)
+      if (coerced === undefined) continue
+      value = coerced
+    }
     if (param.upload === 'media') continue // merged back into the JSON array below
     node.inputs[param.inputKey] = value
   }

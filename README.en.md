@@ -29,7 +29,7 @@
 Right-docked; open from the sidebar rail — three tabs:
 
 - **Workflows** — the plugin library of runnable (API) workflows: create / edit / run / delete, plus "Import file" to load an API-format `.json` directly. The **ComfyUI-saved graphs** section auto-detects graph workflows you saved in ComfyUI, shows which runnable workflows were extracted from each, and offers **extract** with per-graph analysis: a canvas often holds several independent flows, so you choose extract all / extract per component / extract main flow only. Workflows can be classified with **tags** (see below).
-- **Assets** — everything the plugin generated, newest first, with a detail view and download links.
+- **Assets** — everything the plugin generated, newest first, with a detail view and download links. Hovering a card reveals a red trash button; it opens a confirmation dialog listing the files, and confirming removes the index record and deletes the matching files from the ComfyUI output directory. ComfyUI itself has no API for deleting output files, so the plugin touches the filesystem directly: files are only really deleted when DSH can reach that directory (same-machine installs); otherwise just the record goes and the dialog says so.
 - **Queue** — a task center over ComfyUI's unified jobs API (`/api/jobs`): every task across the live queue **and** history in five states (pending / in progress / completed / failed / cancelled), filterable by state, with per-task progress bars (plugin-submitted jobs), preview thumbnails, failure messages and duration, plus actions — delete, interrupt, rerun, clear queue/history, free memory. Tasks the plugin queued are marked with their workflow name.
 
 <p align="center"><img src="images/panel.png" width="70%" alt="Main panel: workflows / assets / queue" title="Main panel: workflows / assets / queue" /></p>
@@ -38,8 +38,10 @@ Right-docked; open from the sidebar rail — three tabs:
 
 A media loader in the style of ComfyUI's LoadImage node, sitting at the top of the Workflows tab: besides images, the picker also lists the video and audio files available to the ComfyUI loader nodes (LoadVideo / LoadAudio).
 
-- Shows the **current source image** as a large preview; clicking opens a picker window with a nav bar (All / Imported / Generated), a type filter, a paste/upload drop zone on the right, and a masonry grid of every image in the ComfyUI `input` directory plus everything the plugin generated. Picking an image closes the window and makes it the current source.
-- The current source image is the **default input image**: an unset image-loading parameter of a workflow run is filled with the current source image (the first image parameter when there are several) — the agent does not need to name a file.
+- **Multiple slots**: the load area is a list of slots — a lone slot stretches across the panel, two or more share a fixed width and wrap into rows. "+ Add slot" at the bottom appends one; an empty slot reads "Slot N / Add media" and fills on click; hovering a slot reveals an **×** in its corner that deletes it, and the picker's first tile ("None") empties a slot while keeping it. Filled slots fill the workflow's unset loader parameters in order — a two-reference workflow just needs two slots, with no file names for the agent to guess.
+- Clicking any slot opens a picker window with a nav bar (All / Imported / Generated), a type filter, a paste/upload drop zone on the right, and a masonry grid of every loadable image / video / audio file in the ComfyUI `input` directory plus everything the plugin generated. **Video and audio play right in the card** (clicking the player only plays, it never selects); clicking the file name under a card picks it and closes the window. File kind is decided by extension, and each loader's input key is read from the ComfyUI node definition (`LoadImage.image` / `LoadVideo.file` / `LoadAudio.audio`), so no media type goes missing.
+- Load-area media are the **default inputs**: unset loader parameters are filled from the slots in order (slot 1 → first image parameter, slot 2 → second; video/audio parameters take slots of their own kind) — the agent does not need to name a file. Parameters with no matching slot keep the workflow's authored value.
+- **Visible to the agent**: `comfyui_workflow action: list` reports a `loadArea` field (slot count, how many are filled, and the file list), so the agent knows what the user loaded without asking.
 - **Resolution auto-match**: uploads record their pixel size; when a run leaves `width`/`height` unset, they default to the source image's actual size.
 - **Hash naming + dedup**: uploads are renamed to `original_shorthash.ext` (SHA-256 first 10 hex); re-uploading an identical file reuses the existing name instead of storing a duplicate. The picker refreshes live after uploads.
 - Selecting a **generated** image copies it from the output directory into `input` on the fly, so image-loading nodes can use it.
@@ -56,7 +58,7 @@ Classify runnable workflows with preset categories (image-to-image / text-to-ima
 
 ### Media proxy
 
-Generated files stream through a same-origin route (`/comfyui/media`), so the browser never talks to ComfyUI directly: no CORS, no mixed-content, no API key in the page, and remote ComfyUI installs work unchanged. The media URL base is auto-detected: on every page load the browser self-reports the origin it actually uses via `/comfyui/ping` (LAN IP / domain / reverse proxy all produce working links), or you can pin it explicitly with the `mediaHost` config key.
+Generated files are addressed by `filename + subfolder + type` and stream through a same-origin route (`/comfyui/media`), never through ComfyUI's in-memory history — older results in the asset panel keep opening after a ComfyUI restart or a history clear, as long as the file is still in the output directory. The browser never talks to ComfyUI directly: no CORS, no mixed-content, no API key in the page, and remote ComfyUI installs work unchanged. The media URL base is auto-detected: on every page load the browser self-reports the origin it actually uses via `/comfyui/ping` (LAN IP / domain / reverse proxy all produce working links), or you can pin it explicitly with the `mediaHost` config key.
 
 ### Tool card
 
@@ -92,7 +94,9 @@ Extraction follows the live `/object_info`: rewires Reroute/bypass pass-throughs
 Every runnable workflow carries an adjustable **parameter set** (`parameters`) so one workflow can produce different results per run:
 
 - **Auto-detected (conservative)**: prompt text inputs, resolution (`EmptyLatentImage` width/height), sampler steps (`KSampler.steps`), and seed (`KSampler.seed`, randomized per run by default). Sampling-related inputs (cfg/denoise) and model selections stay as authored.
-- **Advanced parameters**: the panel's workflow editor can expose any node input as a custom parameter (pick node → pick input → name it), and edit each parameter's name, label, default, and random toggle.
+- **Advanced parameters**: the panel's workflow editor can expose any node input as a custom parameter (pick node → pick input → name it), and edit each parameter's name, label, default, and random toggle. The list offers every widget value of the node (a loader's `upload` entry included); inputs currently driven by a link are left out, since they carry no editable value and exposing one would only fight the connection.
+- **Boolean parameters use a checkbox**: pick `true` / `false` directly; at run time the `"true"` / `"false"` / `0` / `1` spellings are accepted too (defaults stored as strings by older versions are normalized instead of being silently dropped).
+- **Int vs. float number parameters**: the declared input type (`INT` / `FLOAT`) is read from the ComfyUI node definition, so FLOAT inputs like `cfg` or `denoise` accept decimals while INT inputs like `steps` or `seed` are rounded at run time; unknown types are treated as decimals. Each row shows `number/int` or `number/float`, with range and step in the tooltip.
 - **Agent-facing**: the parameter list is written into the workflow's input notes (`inputs` field) and shown by `comfyui_workflow` `action: list`; `action: run` accepts `parameters: {"prompt": "...", "seed": 42}` overrides — explicit values win over random/default, omitted parameters use their defaults.
 - **Load-area integration**: an unset image-type parameter is filled with the load-area's current source image, and unset `width`/`height` are auto-matched to that image's recorded pixel size. Explicit values always win, so the agent can still override both.
 
@@ -150,6 +154,7 @@ The plugin reads a `comfyui` section from `cordis.yml` (or the settings page):
     dataDir: ''
     maxAssets: 200
     mediaHost: ''
+    outputDir: ''
 ```
 
 | Key | Default | Description |
@@ -164,6 +169,7 @@ The plugin reads a `comfyui` section from `cordis.yml` (or the settings page):
 | `dataDir` | *(DSH data dir)* | Where the workflow library and asset index live (`$DSH_HOME/data/dsh-comfyui` by default) |
 | `maxAssets` | `200` | Max entries kept in the asset index |
 | `mediaHost` | `''` (auto-detect) | External base URL for generated media (e.g. `http://192.168.1.5:3080`); empty auto-uses the origin the browser actually reaches this server with |
+| `outputDir` | `''` (inferred) | ComfyUI's output directory on this machine, used to locate files when deleting an asset; empty infers it from the paths ComfyUI reports, and deletion falls back to removing the index record when it cannot (e.g. a remote ComfyUI) |
 
 ## Roadmap & design boundaries
 

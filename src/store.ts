@@ -9,6 +9,9 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { WorkflowParameter } from './params.js'
 
+/** Trailing newline for the JSON files this store writes. */
+const NEWLINE = '\n'
+
 /** One saved workflow in the library. */
 export interface StoredWorkflow {
   id: string
@@ -47,6 +50,9 @@ export interface AssetRecord {
   source: string
   media: AssetMediaRef[]
 }
+
+/** One load-area slot: a picked file, or `null` for an empty slot. */
+export type LoadSlot = CurrentImage | null
 
 /** The load-area selection: the image the user picked for image-to-image.
  * `name` is always a file name ComfyUI can load (generated outputs are copied
@@ -149,20 +155,43 @@ export class ComfyUIStore {
     await writeFile(this.mediaHashesPath, `${JSON.stringify(hashes, null, 2)}\n`, 'utf8')
   }
 
-  /** The load-area selection (survives restarts so image-to-image keeps its default source image). */
-  async loadCurrentImage(): Promise<CurrentImage | undefined> {
-    const parsed = await readJsonFile<CurrentImage>(this.currentImagePath, undefined as unknown as CurrentImage)
-    if (typeof parsed !== 'object' || parsed === null) return undefined
-    if (typeof parsed.name !== 'string' || parsed.name === '') return undefined
-    return {
-      name: parsed.name,
-      kind: parsed.kind === 'video' || parsed.kind === 'audio' ? parsed.kind : 'image',
-      source: parsed.source === 'generated' ? 'generated' : 'imported',
+  /** The load-area slots: an ordered list where each entry is either a picked
+   * file or `null` for an empty slot the user added but has not filled yet.
+   * Slot 0 is the primary source (the big preview, and the default source
+   * image for image-to-image).
+   *
+   * The file held a single `{name,kind,source}` object before the load area
+   * had more than one slot; that shape is still read and lifted into a
+   * one-slot list, so an existing selection survives the upgrade. */
+  async loadSlots(): Promise<LoadSlot[]> {
+    const parsed = await readJsonFile<{ items?: unknown } | CurrentImage>(this.currentImagePath, undefined as unknown as CurrentImage)
+    if (typeof parsed !== 'object' || parsed === null) return []
+    const raw = Array.isArray((parsed as { items?: unknown }).items)
+      ? (parsed as { items: unknown[] }).items
+      : [parsed]
+    const slots: LoadSlot[] = []
+    for (const entry of raw) {
+      if (entry === null) {
+        slots.push(null)
+        continue
+      }
+      if (typeof entry !== 'object') continue
+      const { name, kind, source } = entry as Partial<CurrentImage>
+      if (typeof name !== 'string' || name === '') {
+        slots.push(null)
+        continue
+      }
+      slots.push({
+        name,
+        kind: kind === 'video' || kind === 'audio' ? kind : 'image',
+        source: source === 'generated' ? 'generated' : 'imported',
+      })
     }
+    return slots
   }
 
-  async saveCurrentImage(image: CurrentImage): Promise<void> {
-    await writeFile(this.currentImagePath, `${JSON.stringify(image, null, 2)}\n`, 'utf8')
+  async saveSlots(slots: LoadSlot[]): Promise<void> {
+    await writeFile(this.currentImagePath, JSON.stringify({ items: slots }, null, 2) + NEWLINE, 'utf8')
   }
 
   async listWorkflows(): Promise<StoredWorkflow[]> {
@@ -243,6 +272,17 @@ export class ComfyUIStore {
   }
 
   /** Prepend an asset record (deduplicated by promptId, capped at maxAssets). */
+  /** Drop one asset record from the index; returns the record that was
+   * removed so the caller can delete the files it referenced. */
+  async deleteAsset(promptId: string): Promise<AssetRecord | undefined> {
+    const list = await this.listAssets()
+    const index = list.findIndex((record) => record.promptId === promptId)
+    if (index === -1) return undefined
+    const [removed] = list.splice(index, 1)
+    await writeFile(this.assetsPath, JSON.stringify(list, null, 2) + NEWLINE, 'utf8')
+    return removed
+  }
+
   async appendAsset(record: AssetRecord): Promise<void> {
     const list = await this.listAssets()
     if (list.some((entry) => entry.promptId === record.promptId)) return
