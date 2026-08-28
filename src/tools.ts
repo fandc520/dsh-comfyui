@@ -213,10 +213,12 @@ function summarizeMedia(media: RunMediaItem[]): string {
   if (media.length === 0) return 'no media outputs'
   const images = media.filter((item) => item.kind === 'image').length
   const videos = media.filter((item) => item.kind === 'video').length
-  const others = media.length - images - videos
+  const audio = media.filter((item) => item.kind === 'audio').length
+  const others = media.length - images - videos - audio
   const parts: string[] = []
   if (images > 0) parts.push(`${images} image(s)`)
   if (videos > 0) parts.push(`${videos} video(s)`)
+  if (audio > 0) parts.push(`${audio} audio file(s)`)
   if (others > 0) parts.push(`${others} other file(s)`)
   return parts.join(', ')
 }
