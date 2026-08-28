@@ -141,10 +141,11 @@ function resolveOutput(
   nodesById: Map<number, GraphNode>,
   objectInfo: Record<string, unknown>,
   warnings: string[],
+  dropReasons?: Map<string, string>,
 ): [string, number] | unknown | 'missing' {
   const link = links.get(linkId)
   if (link === undefined) return 'missing'
-  return resolveOrigin(link[1], link[2], links, nodesById, objectInfo, warnings)
+  return resolveOrigin(link[1], link[2], links, nodesById, objectInfo, warnings, dropReasons)
 }
 
 function resolveOrigin(
@@ -154,6 +155,7 @@ function resolveOrigin(
   nodesById: Map<number, GraphNode>,
   objectInfo: Record<string, unknown>,
   warnings: string[],
+  dropReasons?: Map<string, string>,
 ): [string, number] | unknown | 'missing' {
   const node = nodesById.get(nodeId)
   if (node === undefined) return 'missing'
@@ -161,22 +163,32 @@ function resolveOrigin(
   // Reroute: the output mirrors the node's input.
   if (node.type === 'Reroute') {
     const inputLink = (node.inputs ?? []).find((entry) => entry.link !== null)?.link
-    if (inputLink === undefined || inputLink === null) return 'missing'
-    return resolveOutput(inputLink, links, nodesById, objectInfo, warnings)
+    if (inputLink === undefined || inputLink === null) {
+      dropReasons?.set(`${nodeId}:${slot}`, `上游节点 ${node.type}（id ${nodeId}）的直通输入没有连接`)
+      return 'missing'
+    }
+    return resolveOutput(inputLink, links, nodesById, objectInfo, warnings, dropReasons)
   }
 
   // Bypassed nodes act as pass-throughs: the output follows the first wired input.
   if (node.mode === 4) {
     const inputLink = (node.inputs ?? []).find((entry) => entry.link !== null)?.link
-    if (inputLink === undefined || inputLink === null) return 'missing'
-    return resolveOutput(inputLink, links, nodesById, objectInfo, warnings)
+    if (inputLink === undefined || inputLink === null) {
+      dropReasons?.set(`${nodeId}:${slot}`, `上游节点 ${node.type}（id ${nodeId} 已绕过）的直通输入没有连接`)
+      return 'missing'
+    }
+    return resolveOutput(inputLink, links, nodesById, objectInfo, warnings, dropReasons)
   }
 
   // Unregistered node types: a UI-only value source inlines its first widget;
   // anything else wired into the chain is a hard conversion error.
   if (objectInfo[node.type] === undefined) {
     const value = Array.isArray(node.widgets_values) ? node.widgets_values[0] : undefined
-    return value !== undefined ? value : 'missing'
+    if (value === undefined) {
+      dropReasons?.set(`${nodeId}:${slot}`, `上游节点 ${node.type}（id ${nodeId}）是未注册的 UI-only 节点且没有内联值`)
+      return 'missing'
+    }
+    return value
   }
 
   // Node id references must be strings: the server keys prompts by string id
@@ -187,6 +199,10 @@ function resolveOrigin(
     ? (objectInfo[node.type] as { output?: unknown[] }).output!.length
     : undefined
   if (outputCount !== undefined && slot >= outputCount) {
+    dropReasons?.set(
+      `${nodeId}:${slot}`,
+      `上游节点 ${node.type}（id ${nodeId}）的第 ${slot} 号输出在服务端不存在（该节点在 API 模式下只有 ${outputCount} 个输出）`,
+    )
     warnings.push(`节点 ${node.type} 的第 ${slot} 号输出在服务端不存在，已断开相关连线`)
     return 'missing'
   }
@@ -253,6 +269,11 @@ export function convertGraphToApi(
 
   const workflow: ApiWorkflow = {}
   const warnings: string[] = []
+  // Inputs that ARE wired in the source graph but whose connection was dropped
+  // during conversion (usually because the upstream slot does not exist on the
+  // server): key `${targetNodeId}.${inputName}` -> drop reasons.
+  const brokenInputs = new Map<string, string[]>()
+  const dropReasons = new Map<string, string>()
   for (const node of candidates) {
     if (node.type === '' || UI_ONLY.has(node.type)) continue
     if (node.mode === 4) continue
@@ -267,8 +288,20 @@ export function convertGraphToApi(
     const inputs: Record<string, unknown> = {}
     for (const entry of node.inputs ?? []) {
       if (entry.link === undefined || entry.link === null) continue
-      const resolved = resolveOutput(entry.link, links, nodesById, objectInfo, warnings)
-      if (resolved !== 'missing') inputs[entry.name] = resolved
+      const resolved = resolveOutput(entry.link, links, nodesById, objectInfo, warnings, dropReasons)
+      if (resolved !== 'missing') {
+        inputs[entry.name] = resolved
+      } else {
+        const link = links.get(entry.link)
+        const srcKey = link !== undefined ? `${link[1]}:${link[2]}` : undefined
+        const hint = srcKey !== undefined && dropReasons.has(srcKey)
+          ? dropReasons.get(srcKey)!
+          : '该连线无法解析（源图链接损坏或上游断线）'
+        const key = `${node.id}.${entry.name}`
+        const arr = brokenInputs.get(key) ?? []
+        arr.push(hint)
+        brokenInputs.set(key, arr)
+      }
     }
     const values = node.widgets_values
     if (Array.isArray(values)) {
@@ -326,9 +359,19 @@ export function convertGraphToApi(
       return options?.lazy !== true && options?.template === undefined
     })
     if (missing.length > 0) {
+      const parts = missing.map((name) => {
+        const hints = brokenInputs.get(`${id}.${name}`)
+        return hints !== undefined && hints.length > 0
+          ? `${name}（源图有连线，但转换时被断开：${hints[0]}）`
+          : name
+      })
+      const hadBroken = missing.some((name) => (brokenInputs.get(`${id}.${name}`)?.length ?? 0) > 0)
       return {
         ok: false,
-        error: `节点 ${node.class_type}（id ${id}）缺少必需输入：${missing.join('、')}——源工作流中这些输入没有连线`,
+        error: `节点 ${node.class_type}（id ${id}）缺少必需输入：${parts.join('、')}`
+          + (hadBroken
+            ? '——被断开的连接在 API 模式下无法表达，请在 ComfyUI 画布上把该输入改接到有效的输出（例如开关节点的 out0），或删除这条连线后再提取'
+            : '——源工作流中这些输入没有连线'),
       }
     }
   }
