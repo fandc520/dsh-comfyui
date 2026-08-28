@@ -34,6 +34,7 @@ comfyui_workflow 的 \`action: list\` 会同时返回：插件库中的 API 工�
 
 - **节点 id 引用必须是字符串**：\`[String(节点id), 输出槽位]\`。服务器按字符串键做字典查找（execution.py validate_inputs），数字引用会 KeyError。
 - **widget 顺序取图节点自身 \`inputs\` 数组**（含 \`widget.name\` 的条目按数组序），而不是 object_info 顺序：它包含动态子 widget（如 TextGenerate 的 sampling_mode.temperature）且**被链接的 widget 仍占据 widgets_values 位置**。object_info 只用于在 INT 输入后插入 \`control_after_generate\`。
+- **\`control_after_generate\` 占位**：名为 \`seed\`/\`noise_seed\` 的 INT（或 object_info 显式声明 \`control_after_generate\`）前面端会渲染生成后控制下拉，其值占据 widgets_values 一个槽位但无 API 输入——提取时消费该值但不写入工作流，否则后续 widget 全部错位（如 TTS-Audio-Suite 的 seed 后跟 "fixed"）。
 - **对象型 widgets_values**（如 VHS_VideoCombine）按名取值，跳过内部状态（\`videopreview\` 等带 \`hidden\` 的对象）。
 - **Reroute 与 bypass（mode 4）节点直通**：输出跟随其第一条有连线的输入。
 - **未注册的 UI-only 节点**：若是 \`Primitive*\` 内联其第一个 widget 值；有输出被使用且非 Primitive → 报错。

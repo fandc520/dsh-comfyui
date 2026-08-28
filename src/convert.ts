@@ -81,8 +81,16 @@ function widgetNamesFor(
     const spec = inputSpec(objectInfo, classType, entry.name)
     const typeSpec = Array.isArray(spec) ? spec[0] : undefined
     const options = Array.isArray(spec) && isObject(spec[1]) ? spec[1] : undefined
-    if (typeSpec === 'INT' && options?.control_after_generate === true) {
-      addUnique('control_after_generate')
+    // ComfyUI's frontend renders a control_after_generate dropdown for INT
+    // widgets named "seed" even when object_info does not declare it (observed
+    // on TTS-Audio-Suite's UnifiedTTSTextNode / UnifiedVoiceDesignerNode). The
+    // dropdown's value occupies one slot in widgets_values, so a placeholder
+    // name is required to keep the zip aligned with the following widgets.
+    if (typeSpec === 'INT' && options?.control_after_generate !== false) {
+      const seedLike = name === 'seed' || /(^|_|-)(seed|noise_seed)$/i.test(name)
+      if (options?.control_after_generate === true || seedLike) {
+        addUnique('control_after_generate')
+      }
     }
   }
 
@@ -308,6 +316,13 @@ export function convertGraphToApi(
       let valueIndex = 0
       for (const name of widgetNamesFor(node.type, objectInfo, node)) {
         if (valueIndex >= values.length) break
+        // control_after_generate is a frontend-only seed dropdown whose value
+        // still occupies a widgets_values slot; it has no API input, so
+        // consume (advance the index) but never emit it into the workflow.
+        if (name === 'control_after_generate') {
+          valueIndex++
+          continue
+        }
         if (!(name in inputs)) inputs[name] = values[valueIndex]
         valueIndex++
       }
