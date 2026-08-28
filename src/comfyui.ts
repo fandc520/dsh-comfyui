@@ -32,6 +32,7 @@ export interface ComfyUIHistoryEntry {
     images?: ComfyUIMediaRef[]
     videos?: ComfyUIMediaRef[]
     gifs?: ComfyUIMediaRef[]
+    audio?: ComfyUIMediaRef[]
   }>
   status?: {
     status_str?: string
@@ -445,7 +446,7 @@ export class ComfyUIClient {
 
 export function hasMedia(entry: ComfyUIHistoryEntry): boolean {
   for (const output of Object.values(entry.outputs ?? {})) {
-    if ((output.images?.length ?? 0) > 0 || (output.videos?.length ?? 0) > 0 || (output.gifs?.length ?? 0) > 0) {
+    if ((output.images?.length ?? 0) > 0 || (output.videos?.length ?? 0) > 0 || (output.gifs?.length ?? 0) > 0 || (output.audio?.length ?? 0) > 0) {
       return true
     }
   }
@@ -508,6 +509,9 @@ export function collectMedia(opts: {
       ['video', output.videos],
       // GIFs are displayable images (animated), not opaque "other".
       ['image', output.gifs],
+      // Audio previews (PreviewAudio) and saves (SaveAudio) surface through
+      // the `audio` field; classify by extension like everything else.
+      ['audio', output.audio],
     ]
     for (const [kind, refs] of collections) {
       for (const [index, ref] of (refs ?? []).entries()) {

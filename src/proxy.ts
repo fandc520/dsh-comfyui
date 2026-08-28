@@ -73,6 +73,7 @@ export function mountComfyUIProxy(ctx: Context, runtime: ComfyUIRuntime): (() =>
           nodeOutput?.images,
           nodeOutput?.videos,
           nodeOutput?.gifs,
+          nodeOutput?.audio,
         ]
         let ref = collections
           .flatMap((items) => items ?? [])
