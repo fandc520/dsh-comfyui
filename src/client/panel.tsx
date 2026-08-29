@@ -64,7 +64,7 @@ interface MediaItem {
   type: string
   node: string
   index: number
-  kind: 'image' | 'video' | 'other'
+  kind: 'image' | 'video' | 'audio' | 'other'
   url: string
 }
 
@@ -2077,7 +2077,40 @@ function AssetThumb(props: { asset: AssetEntry; t: ComfyUIPanelProps['t']; onCli
   return h('div', { className: 'dsc-asset', onClick: props.onClick },
     first.kind === 'video'
       ? h('video', { src: first.url, controls: true, preload: 'metadata', onClick: (event: { stopPropagation: () => void }) => event.stopPropagation() })
-      : h('img', { src: first.url, alt: first.filename, loading: 'lazy', onError: () => setBroken(true) }),
+      : first.kind === 'audio'
+        // Audio cards show a plain note icon + filename (no player inline —
+        // an <img> or <audio> here mislabels live files as evicted or squats
+        // in the grid); the actual player opens in the lightbox preview.
+        ? h('div', { className: 'dsc-asset-audio-icon' },
+            // Dim waveform bars tiled across the green tile (pure decoration;
+            // the speaker glyph stays on top).
+            h('svg', { className: 'dsc-asset-audio-icon-wave', 'aria-hidden': 'true' },
+              h('defs', null,
+                // One horizontal waveform: the pattern tile is as tall as the
+                // card (110px) so nothing repeats vertically, and the bars are
+                // thin (2px) and dense (6px spacing) for a fine waveform look.
+                h('pattern', { id: 'dsc-wave-pattern', width: 64, height: 110, patternUnits: 'userSpaceOnUse' },
+                  h('g', { fill: 'rgba(255,255,255,0.15)' },
+                    h('rect', { x: 0, y: 50, width: 2, height: 10, rx: 1 }),
+                    h('rect', { x: 4, y: 44, width: 2, height: 22, rx: 1 }),
+                    h('rect', { x: 8, y: 48, width: 2, height: 14, rx: 1 }),
+                    h('rect', { x: 12, y: 38, width: 2, height: 34, rx: 1 }),
+                    h('rect', { x: 16, y: 46, width: 2, height: 18, rx: 1 }),
+                    h('rect', { x: 20, y: 52, width: 2, height: 6, rx: 1 }),
+                    h('rect', { x: 24, y: 40, width: 2, height: 30, rx: 1 }),
+                    h('rect', { x: 28, y: 48, width: 2, height: 14, rx: 1 }),
+                    h('rect', { x: 32, y: 42, width: 2, height: 26, rx: 1 }),
+                    h('rect', { x: 36, y: 36, width: 2, height: 38, rx: 1 }),
+                    h('rect', { x: 40, y: 47, width: 2, height: 16, rx: 1 }),
+                    h('rect', { x: 44, y: 51, width: 2, height: 8, rx: 1 }),
+                    h('rect', { x: 48, y: 40, width: 2, height: 30, rx: 1 }),
+                    h('rect', { x: 52, y: 45, width: 2, height: 20, rx: 1 }),
+                    h('rect', { x: 56, y: 38, width: 2, height: 34, rx: 1 }),
+                    h('rect', { x: 60, y: 49, width: 2, height: 12, rx: 1 })))),
+              h('rect', { width: '100%', height: '100%', fill: 'url(#dsc-wave-pattern)' })),
+            h('svg', { className: 'dsc-asset-audio-icon-sym', viewBox: '0 0 24 24', 'aria-hidden': 'true', dangerouslySetInnerHTML: { __html: '<path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>' } }),
+            h('span', { className: 'dsc-asset-audio-icon-name', title: first.filename }, first.filename))
+        : h('img', { src: first.url, alt: first.filename, loading: 'lazy', onError: () => setBroken(true) }),
     h('div', { className: 'dsc-asset-meta' }, props.asset.workflowName ?? '—'),
     trash,
   )

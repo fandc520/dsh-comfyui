@@ -158,6 +158,10 @@ select.dsc-input option { background: var(--dsw-alias-bg-layer-1); color: var(--
 .dsc-asset:hover .dsc-asset-trash, .dsc-asset-trash:focus-visible { opacity: 1; }
 .dsc-asset-trash:hover { background: var(--dsw-alias-state-error-primary); color: #fff; }
 .dsc-asset img, .dsc-asset video { width: 100%; height: 110px; object-fit: cover; display: block; background: #000; }
+.dsc-asset-audio-icon { position: relative; width: 100%; height: 110px; box-sizing: border-box; padding: 0 6px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; background: #26702b; overflow: hidden; }
+.dsc-asset-audio-icon-wave { position: absolute; inset: 0; width: 100%; height: 100%; }
+.dsc-asset-audio-icon-sym { position: relative; width: 42px; height: 42px; color: #fff; }
+.dsc-asset-audio-icon-name { position: relative; max-width: 100%; font-size: 11px; color: rgba(255, 255, 255, 0.9); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dsc-asset--empty {
   height: 110px; padding: 8px; box-sizing: border-box;
   display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 4px;
