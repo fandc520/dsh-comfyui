@@ -85,6 +85,16 @@ export interface ComfyUIUserDataEntry {
   modified?: number
 }
 
+/**
+ * The raw response of a streamed /view download, ready for a proxy to
+ * re-emit status/headers and pipe the body through unchanged.
+ */
+export interface ComfyViewStream {
+  status: number
+  headers: globalThis.Headers
+  body: globalThis.ReadableStream<Uint8Array> | null
+}
+
 /** Failure talking to the ComfyUI server. */
 export class ComfyUIError extends Error {
   constructor(message: string, readonly status?: number) {
@@ -107,7 +117,7 @@ function sleep(millis: number, signal: AbortSignal): Promise<void> {
   })
 }
 
-function guessContentType(filename: string): string {
+export function guessContentType(filename: string): string {
   const lower = filename.toLowerCase()
   if (lower.endsWith('.png')) return 'image/png'
   if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg'
@@ -419,6 +429,43 @@ export class ComfyUIClient {
         throw new ComfyUIError(`ComfyUI media too large: ${bytes.byteLength} bytes exceeds maxMediaBytes ${this.maxMediaBytes}`)
       }
       return { bytes, contentType: response.headers.get('content-type') ?? guessContentType(ref.filename) }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /**
+   * Stream one generated media file through GET /view without buffering it,
+   * honoring an optional Range header so the browser can seek in audio/video
+   * (the media proxy re-emits the status/headers and pipes the body). ComfyUI
+   * answers valid ranges with 206 + Content-Range and out-of-range starts with
+   * 416 — both pass through untouched. HEAD forwards as HEAD so no body is
+   * downloaded. The maxMediaBytes guard applies to the full 200 response only
+   * (a partial segment is bounded by definition).
+   */
+  async fetchViewStreamed(
+    ref: ComfyUIMediaRef,
+    rangeHeader?: string,
+    method: 'GET' | 'HEAD' = 'GET',
+  ): Promise<ComfyViewStream> {
+    const params = new URLSearchParams({ filename: ref.filename, subfolder: ref.subfolder, type: ref.type })
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), this.connectTimeoutMs)
+    try {
+      const headers: Record<string, string> = {}
+      if (this.apiKey !== undefined) headers['Authorization'] = `Bearer ${this.apiKey}`
+      if (rangeHeader !== undefined) headers['Range'] = rangeHeader
+      const response = await fetch(this.endpoint(`/view?${params.toString()}`), { headers, method, signal: controller.signal })
+      if (response.status !== 206 && response.status !== 416 && !response.ok) {
+        throw new ComfyUIError(`ComfyUI /view failed: HTTP ${response.status}`)
+      }
+      if (response.status === 200) {
+        const contentLength = response.headers.get('content-length')
+        if (contentLength !== null && Number(contentLength) > this.maxMediaBytes) {
+          throw new ComfyUIError(`ComfyUI media too large: ${contentLength} bytes exceeds maxMediaBytes ${this.maxMediaBytes}`)
+        }
+      }
+      return { status: response.status, headers: response.headers, body: response.body }
     } finally {
       clearTimeout(timer)
     }

@@ -6,8 +6,46 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
+import type { ComfyUIClient } from './comfyui.js'
+import { guessContentType } from './comfyui.js'
+import type { ComfyUIMediaRef } from './comfyui.js'
 import { errorMessage, sendJson } from './http.js'
 import type { ComfyUIRuntime } from './tools.js'
+
+/**
+ * Relay one ComfyUI /view download to the browser in streaming fashion.
+ * Browser <audio>/<video> players seek with `Range: bytes=…` requests; without
+ * 206 + Content-Range support the seekable range stays empty (progress bar
+ * snaps back) and long audio's duration can be mis-derived. ComfyUI's /view
+ * handles Range natively, so re-emit its status/headers and pipe the body
+ * through — a 206 pass-through costs nothing extra.
+ */
+async function relayViewStream(
+  client: ComfyUIClient,
+  ref: ComfyUIMediaRef,
+  request: IncomingMessage,
+  response: ServerResponse,
+): Promise<void> {
+  const requestMethod: 'GET' | 'HEAD' = request.method === 'HEAD' ? 'HEAD' : 'GET'
+  const { status, headers, body } = await client.fetchViewStreamed(ref, request.headers.range, requestMethod)
+  const head: Record<string, string | number> = {
+    'content-type': headers.get('content-type') ?? guessContentType(ref.filename),
+    'accept-ranges': 'bytes',
+    'cache-control': 'private, max-age=3600',
+  }
+  const contentLength = headers.get('content-length')
+  if (contentLength !== null) head['content-length'] = contentLength
+  const contentRange = headers.get('content-range')
+  if (contentRange !== null) head['content-range'] = contentRange
+  response.writeHead(status, head)
+  if (requestMethod === 'HEAD' || body === null) {
+    response.end()
+    return
+  }
+  await pipeline(Readable.fromWeb(body), response)
+}
 
 /**
  * Mount the media proxy route on the host web server.
@@ -38,22 +76,17 @@ export function mountComfyUIProxy(ctx: Context, runtime: ComfyUIRuntime): (() =>
         const ref = { filename: file, subfolder: url.searchParams.get('subfolder') ?? '', type: url.searchParams.get('type') ?? 'output' }
         try {
           const client = runtime.createClient(await runtime.getApiKey())
-          const { bytes, contentType } = await client.fetchView(ref)
-          response.writeHead(200, {
-            'content-type': contentType,
-            'content-length': bytes.byteLength,
-            'cache-control': 'private, max-age=3600',
-          })
-          if (request.method === 'HEAD') {
-            response.end()
-            return
-          }
-          response.end(Buffer.from(bytes))
-          return
+          await relayViewStream(client, ref, request, response)
         } catch (error) {
-          sendJson(response, 502, { error: errorMessage(error) })
-          return
+          if (response.headersSent) {
+            // Headers already on the wire (mid-stream failure, e.g. the
+            // browser closed the tab): just close, no error JSON possible.
+            response.end()
+          } else {
+            sendJson(response, 502, { error: errorMessage(error) })
+          }
         }
+        return
       }
       if (prompt === null || node === null || indexText === null) {
         sendJson(response, 400, { error: 'prompt, node, and index query parameters are required (or file + subfolder + type)' })
@@ -95,19 +128,14 @@ export function mountComfyUIProxy(ctx: Context, runtime: ComfyUIRuntime): (() =>
           }
           ref = { filename: item.filename, subfolder: item.subfolder, type: item.type }
         }
-        const { bytes, contentType } = await client.fetchView(ref)
-        response.writeHead(200, {
-          'content-type': contentType,
-          'content-length': bytes.byteLength,
-          'cache-control': 'private, max-age=3600',
-        })
-        if (request.method === 'HEAD') {
-          response.end()
-          return
-        }
-        response.end(Buffer.from(bytes))
+        await relayViewStream(client, ref, request, response)
       } catch (error) {
-        sendJson(response, 502, { error: errorMessage(error) })
+        if (response.headersSent) {
+          // Headers already on the wire (mid-stream failure): close quietly.
+          response.end()
+        } else {
+          sendJson(response, 502, { error: errorMessage(error) })
+        }
       }
     },
   })
