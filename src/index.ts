@@ -101,6 +101,9 @@ export async function apply(ctx: Context, entryConfig: Partial<ConfigType>): Pro
     maxAssets: entryConfig.maxAssets ?? 200,
     mediaHost: entryConfig.mediaHost ?? '',
     outputDir: entryConfig.outputDir ?? '',
+    comfyuiDirs: Array.isArray(entryConfig.comfyuiDirs)
+      ? entryConfig.comfyuiDirs.filter((dir): dir is string => typeof dir === 'string' && dir.trim() !== '')
+      : [],
   }
 
   const store = new ComfyUIStore(resolved.dataDir, resolved.maxAssets)
@@ -188,6 +191,18 @@ export async function apply(ctx: Context, entryConfig: Partial<ConfigType>): Pro
     listWorkflows: () => store.listWorkflows(),
     getWorkflow: (id) => store.getWorkflow(id),
     saveWorkflow: (input) => store.saveWorkflow(input),
+    refreshVoiceLibrary: async (): Promise<boolean> => {
+      // TTS-Audio-Suite keeps a process-level voice-discovery cache behind the
+      // object_info COMBO that does not self-heal: a voice added to disk stays
+      // invisible until the cache is invalidated once. Hitting the custom-node
+      // endpoint with refresh=1 performs the rescan and invalidates the cache,
+      // so the object_info read that follows (refresh-params / action: refresh)
+      // reports the current library. Servers without TTS-Audio-Suite answer
+      // 404; the failure is swallowed and callers proceed with the object_info
+      // snapshot they get anyway.
+      const client = runtime.createClient(await resolveApiKey(ctx, resolved.apiKeyEnv))
+      return client.getOk('/api/tts-audio-suite/voice-library?refresh=1', 20_000)
+    },
     deleteWorkflow: (id) => store.deleteWorkflow(id),
     listMediaSizes: () => store.loadMediaSizes(),
     saveMediaSize: (name, size) => store.saveMediaSize(name, size),

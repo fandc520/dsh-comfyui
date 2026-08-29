@@ -19,6 +19,11 @@ export const zh = {
   configNotWritable: '设置服务不可用，请通过 cordis.yml 修改配置。',
   mediaHost: '媒体访问地址',
   mediaHostHint: '生成图片/媒体在聊天中使用的完整地址（如 http://192.168.1.5:3080）。留空时自动使用浏览器访问本服务器的地址；内网或反向代理下若图片不显示，请在此填写你访问本页面所用的地址。',
+  comfyuiDirs: 'ComfyUI 目录',
+  comfyuiDirsHint: '本机 ComfyUI 安装目录，可添加多个（目录映射 / 多实例 / 便携版）。Agent 会据此直接定位你的 ComfyUI 文件（models、工作流、TTS-Audio-Suite 音色库等），无需再向你询问。',
+  comfyuiDirAdd: '＋ 添加目录',
+  comfyuiDirRemove: '移除该目录',
+  comfyuiDirPlaceholder: '如 D:\\ComfyUI',
   language: '界面语言',
   languageHint: '切换插件界面语言（中文 / English）。切换后页面会自动刷新。',
   // tool card
@@ -202,6 +207,11 @@ export const en = {
   configNotWritable: 'Settings service unavailable — edit cordis.yml instead.',
   mediaHost: 'Media base URL',
   mediaHostHint: 'Absolute base URL used for generated media in chat (e.g. http://192.168.1.5:3080). Leave empty to auto-detect the address your browser uses to reach this server; fill it in when images do not load over LAN or a reverse proxy.',
+  comfyuiDirs: 'ComfyUI directories',
+  comfyuiDirsHint: 'ComfyUI install root(s) on this machine; add multiple for mapped/multiple installs. The agent reads these to locate your ComfyUI files (models, workflows, the TTS-Audio-Suite voice library) directly instead of asking you.',
+  comfyuiDirAdd: '+ Add directory',
+  comfyuiDirRemove: 'Remove this directory',
+  comfyuiDirPlaceholder: 'e.g. D:\\ComfyUI',
   language: 'Language',
   languageHint: 'Switch the plugin UI language (中文 / English). The page reloads after switching.',
   // tool card

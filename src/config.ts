@@ -31,6 +31,12 @@ export const Config = z.object({
    * deletion falls back to removing the index record when neither works
    * (e.g. a ComfyUI running on another host). */
   outputDir: z.string().default(''),
+  /** ComfyUI install root(s) on this machine (absolute paths). Multiple
+   * entries are allowed because ComfyUI folders can be mapped/mounted (extra
+   * models dirs, several installs, portable copies). The agent reads them to
+   * locate ComfyUI files directly (workflows, models, the TTS-Audio-Suite
+   * voice library) without guessing or asking the user. */
+  comfyuiDirs: z.array(z.string()).default([]),
 })
 
 export type Config = {
@@ -56,4 +62,6 @@ export type Config = {
   mediaHost: string
   /** ComfyUI's output directory on this machine; empty infers it from reported file paths. */
   outputDir: string
+  /** ComfyUI install root(s) on this machine; the agent uses them to locate files directly. */
+  comfyuiDirs: string[]
 }

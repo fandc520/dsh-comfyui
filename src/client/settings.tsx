@@ -20,6 +20,7 @@ interface ConfigView {
   pollIntervalMs: number
   maxMediaItems: number
   mediaHost: string
+  comfyuiDirs: string[]
   writable: boolean
 }
 
@@ -34,6 +35,7 @@ export function ComfyUISettings({ t }: ComfyUISettingsProps): ReturnType<typeof 
   const [baseUrl, setBaseUrl] = useState('')
   const [apiKeyEnv, setApiKeyEnv] = useState('')
   const [mediaHost, setMediaHost] = useState('')
+  const [comfyuiDirs, setComfyuiDirs] = useState<string[]>([])
   const [loadError, setLoadError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [saveState, setSaveState] = useState<'idle' | 'saved' | 'failed'>('idle')
@@ -49,6 +51,7 @@ export function ComfyUISettings({ t }: ComfyUISettingsProps): ReturnType<typeof 
       setBaseUrl(view.baseUrl)
       setApiKeyEnv(view.apiKeyEnv)
       setMediaHost(view.mediaHost ?? '')
+      setComfyuiDirs(Array.isArray(view.comfyuiDirs) ? view.comfyuiDirs : [])
     }).catch((error: unknown) => {
       if (cancelled) return
       setLoadError(error instanceof Error ? error.message : String(error))
@@ -62,12 +65,15 @@ export function ComfyUISettings({ t }: ComfyUISettingsProps): ReturnType<typeof 
     setSaving(true)
     setSaveState('idle')
     try {
-      const payload = (await postJson('/comfyui/config', { patch: { baseUrl, apiKeyEnv, mediaHost } })) as { config?: ConfigView }
+      // Trim blanks and drop empty rows before persisting.
+      const dirs = comfyuiDirs.map((dir) => dir.trim()).filter((dir) => dir !== '')
+      const payload = (await postJson('/comfyui/config', { patch: { baseUrl, apiKeyEnv, mediaHost, comfyuiDirs: dirs } })) as { config?: ConfigView }
       if (payload.config !== undefined) {
         setConfig(payload.config)
         setBaseUrl(payload.config.baseUrl)
         setApiKeyEnv(payload.config.apiKeyEnv)
         setMediaHost(payload.config.mediaHost ?? '')
+        setComfyuiDirs(payload.config.comfyuiDirs ?? [])
       }
       setSaveState('saved')
     } catch (error) {
@@ -149,6 +155,46 @@ export function ComfyUISettings({ t }: ComfyUISettingsProps): ReturnType<typeof 
         onChange: (event: { target: { value: string } }) => { setMediaHost(event.target.value); setSaveState('idle') },
       }),
       h('div', { className: 'dsc-hint' }, t('mediaHostHint')),
+    ),
+    h('div', { className: 'dsc-field' },
+      h('label', null, t('comfyuiDirs')),
+      comfyuiDirs.map((dir, index) => h('div', {
+        key: `dsc-dir-${index}`,
+        style: { display: 'flex', gap: '8px', marginBottom: '8px', alignItems: 'center' },
+      },
+        h('input', {
+          className: 'dsc-input',
+          value: dir,
+          placeholder: t('comfyuiDirPlaceholder'),
+          style: { flex: '1' },
+          onChange: (event: { target: { value: string } }) => {
+            const next = comfyuiDirs.slice()
+            next[index] = event.target.value
+            setComfyuiDirs(next)
+            setSaveState('idle')
+          },
+        }),
+        h('button', {
+          className: 'dsc-btn',
+          title: t('comfyuiDirRemove'),
+          disabled: !config.writable,
+          onClick: () => {
+            const next = comfyuiDirs.slice()
+            next.splice(index, 1)
+            setComfyuiDirs(next)
+            setSaveState('idle')
+          },
+        }, '×'),
+      )),
+      h('button', {
+        className: 'dsc-btn',
+        disabled: !config.writable,
+        onClick: () => {
+          setComfyuiDirs([...comfyuiDirs, ''])
+          setSaveState('idle')
+        },
+      }, t('comfyuiDirAdd')),
+      h('div', { className: 'dsc-hint' }, t('comfyuiDirsHint')),
     ),
     h('div', { className: 'dsc-row' },
       h('button', { className: 'dsc-btn', disabled: saving || !config.writable, onClick: () => void save() }, t('save')),

@@ -8,9 +8,9 @@ export const COMFYUI_SKILL = {
   name: 'dsh-comfyui-workflows',
   source: 'runtime',
   description:
-    'ComfyUI 工作流管理：区分“图工作流”（ComfyUI 端保存的画布，衍生主题）与“API 工作流”（可执行，运行主题），分析画布中的多个独立流程（连通分量），以及图→API 提取的规则与面板操作引导。处理 comfyui_workflow 或用户要求运行 ComfyUI 端保存的工作流时加载。',
+    'ComfyUI 工作流管理：区分“图工作流”（ComfyUI 端保存的画布，衍生主题）与“API 工作流”（可执行，运行主题），分析画布中的多个独立流程（连通分量），以及图→API 提取的规则与面板操作引导。也包含本机环境（用户 ComfyUI 目录）与 TTS-Audio-Suite 音色库的快速查询/快照刷新方案。处理 comfyui_workflow、需要定位用户 ComfyUI 文件/音色库，或用户要求运行 ComfyUI 端保存的工作流时加载。',
   whenToUse:
-    '用户要求运行/管理 ComfyUI 中保存的工作流，或 comfyui_workflow list 显示未提取的图工作流时；需要判断一个画布是否包含多个独立流程、或解释为何某个工作流无法直接运行时。',
+    '用户要求运行/管理 ComfyUI 中保存的工作流，或 comfyui_workflow list 显示未提取的图工作流时；需要判断一个画布是否包含多个独立流程、或解释为何某个工作流无法直接运行时；需要查询 TTS-Audio-Suite 音色库、刷新已存工作流的音色参数快照、或定位用户本机 ComfyUI 目录时。',
   content: `# dsh-comfyui 工作流管理
 
 本插件把 ComfyUI 工作流分成两个主题：
@@ -19,6 +19,38 @@ export const COMFYUI_SKILL = {
 - **API 工作流（运行主题）**：可执行的 API 格式 prompt，是"运行单元"。从图里**提取（extract）**出来，或用户直接粘贴导入。运行必须用 API 工作流。
 
 comfyui_workflow 的 \`action: list\` 会同时返回：插件库中的 API 工作流（\`workflows\`）和 ComfyUI 端保存的图工作流（\`comfyuiWorkflows\`，带 \`extracted\` 与 \`derived\` 派生列表）。
+
+## 本机环境（先看这里，不要反复问用户）
+
+- \`comfyui_workflow action: list\` 每次都会返回 \`env\` 字段：\`baseUrl\`（ComfyUI 服务器地址）与 \`comfyuiDirs\`（用户在设置页"ComfyUI 目录"配置的安装目录，可多个——目录映射/多实例/便携版）。**需要知道服务器地址，或要定位用户 ComfyUI 的文件（models、自定义节点、音色库、输出目录等都在这下面）时，先跑一次 list 读 env**。每次调用都取最新值，设置页改完立刻生效。
+- \`comfyuiDirs\` 为空 = 未配置：先询问用户，或探测常见位置（\`C:\\ComfyUI\`、\`D:\\ComfyUI\`、ComfyUI 桌面版 \`...\\ComfyUI-Installs\\ComfyUI\\ComfyUI\`）。以下所有 \`{comfyuiDir}\` 都代指 env.comfyuiDirs 里的每个目录。
+
+## TTS-Audio-Suite 音色库查询（先刷新快照，再查询；不用翻插件源码）
+
+TTS-Audio-Suite（\`{comfyuiDir}/custom_nodes/tts_audio_suite\`）的"🎭 Character Voices"（类名 \`CharacterVoicesNode\`）节点用 \`voice_name\` 下拉选音色。音色相关的数据有**两份，都会过期**：TTS 自己的进程缓存（影响下拉与 object_info 的 COMBO），与 dsh-comfyui 存的工作流参数快照（\`~/.dsh/data/dsh-comfyui/workflows.json\` 里每个参数保存时拷贝的 \`options\` / \`numberKind\` / min/max/step，之后**不再自动更新**）。**正确流程：先刷新，再查询**——只查询不刷新，拿到的列表和快照可能不一致，新音色会被运行前校验拒绝。
+
+**第 1 步：刷新**（新音色 / 节点定义变更后做一次）：
+
+- **\`comfyui_workflow action: refresh { id: "<工作流id>" }\`**（一个 id 一个）一步做两件事：①强制 TTS-Audio-Suite 重扫音色库（\`?refresh=1\`，失效进程缓存，让 object_info 的 COMBO 用上新列表）②读最新 object_info，把该工作流所有参数的 options / numberKind / min/max/step 更新并**存回快照**。只动从 object_info 派生的字段：参数集合（含用户在面板手加的高级参数）与默认值原样保留。返回 \`changed\` 列出实际变了的参数名；无变化的不动。刷完 \`action: list\` 就能看到新选项。
+- **其他插件/程序要刷新**：同源路由 \`POST /comfyui/workflows/refresh-params\`，body \`{ "id": "<工作流id>" }\`，返回 \`{ ok, parameters, changed }\`。设计音色成功后自动调一次即可，不需要重新保存工作流。
+- 不刷新的后果：新音色的 key 不在旧 options 里，\`action: run\` 传它会被运行前校验拒绝（"parameter ... is not one of the allowed options"）——**这是快照过期，不是音色库没刷新**。\`voice_name\` 下拉不受影响（读取时实时查 object_info），面板里立刻能看到新音色。
+- 注意区分：单独打 \`?refresh=1\`（或让用户在 ComfyUI 画布按 R）只重扫 **TTS 的进程缓存**，**不会**更新已存工作流的快照；要让快照跟上必须用 \`action: refresh\` / refresh-params 刷新对应工作流。
+
+**第 2 步：查询**（刷新后拿当前列表 / 元数据 / 试听）：
+
+1. **HTTP 查询（首选，ComfyUI 正在运行时）**——插件在 ComfyUI 服务器上挂了音色库接口，返回的就是下拉里的完整 key 列表（第一个是 \`"none"\`，表示"不用音色、直接传音频"）：
+   - PowerShell：\`Invoke-RestMethod "{baseUrl}/api/tts-audio-suite/voice-library"\`
+   - curl：\`curl -s "{baseUrl}/api/tts-audio-suite/voice-library"\`
+   - \`{baseUrl}\` 换成 env.baseUrl。跳过第 1 步时也可以在 URL 末尾加 \`?refresh=1\` 强制 TTS 重扫（只影响 TTS 缓存，不动快照）。
+   - 单条元数据：\`{baseUrl}/api/tts-audio-suite/voice-info?voice_name=<key>\`；试听音频：\`{baseUrl}/api/tts-audio-suite/voice-preview?voice_name=<key>\`。
+2. **文件系统查询（要音色文件名/路径时）**——音色库目录（按优先级）：
+   - \`{comfyuiDir}/models/voices\`（主力，新音色放这里）
+   - \`{comfyuiDir}/models/TTS/voices\`
+   - \`{comfyuiDir}/custom_nodes/tts_audio_suite/voices_examples/\`（插件自带示例）
+   - \`{comfyuiDir}/extra_model_paths.yaml\` 里 \`voices:\` 映射的额外目录（ComfyUI 目录可以映射，这些目录都要算进去）。
+   - 列举音色（PowerShell）：\`Get-ChildItem "{comfyuiDir}\\models\\voices" -Recurse -File | Where-Object { $_.Extension -match '\\.(wav|mp3|flac|ogg)$' }\`
+
+**规则**：一个音色 = 音频文件（.wav/.mp3/.flac/.ogg/.m4a/.aac）+ 同名参考文本（\`同名.reference.txt\` 优先，其次 \`同名.txt\`，内容非空），**两者齐备**才会出现在 \`voice_name\` 下拉与 HTTP 接口里。下拉 key 是相对路径（如 \`voices_examples/xxx.wav\`、\`TTS/voices/xxx.wav\`、\`subdir/voice.wav\`），填工作流参数时直接用这个 key，不要自造。新增音色：把音频 + 同名 txt 拷进 \`{comfyuiDir}/models/voices\`，再走第 1 步刷新即可。
 
 ## 画布分析规则（判断一个图是不是"多个工作流"）
 

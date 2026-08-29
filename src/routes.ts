@@ -8,7 +8,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { errorMessage, readJsonBody, readRawBody, sameOrigin, sendJson } from './http.js'
 import type { ComfyUIRuntime } from './tools.js'
-import { analyzeWorkflowParameters, comboChildInfo, inputOptions, numberSpecOf, uploadKindOf, type Workflow } from './params.js'
+import { analyzeWorkflowParameters, comboChildInfo, inputOptions, numberSpecOf, refreshParameterMetadata, uploadKindOf, type Workflow } from './params.js'
 import { collectMedia, historyErrorMessage, mediaProxyUrl, type ComfyUIMediaRef } from './comfyui.js'
 import type { AssetRecord } from './store.js'
 import { unlink } from 'node:fs/promises'
@@ -148,6 +148,7 @@ function redact(runtime: ComfyUIRuntime, apiKey: string | undefined): Record<str
     pollIntervalMs: config.pollIntervalMs,
     maxMediaItems: config.maxMediaItems,
     mediaHost: config.mediaHost,
+    comfyuiDirs: config.comfyuiDirs,
     writable: runtime.settingsWritable(),
   }
 }
@@ -358,6 +359,60 @@ export function mountComfyUIRoutes(ctx: Context, runtime: ComfyUIRuntime): (() =
       // decimals instead of assuming every number input is an integer.
       const number = numberSpecOf(objectInfo, classType, inputKey)
       sendJson(response, 200, { ok: true, options: options ?? [], child, upload, number })
+    }),
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/comfyui/workflows/refresh-params',
+    handler: withHint(async (request, response) => {
+      if (!methodIs(request, 'POST')) {
+        sendJson(response, 405, { error: 'method not allowed' })
+        return
+      }
+      const body = await readSameOriginPost(request, response)
+      if (body === undefined) return
+      const id = typeof body.id === 'string' && body.id !== '' ? body.id : ''
+      if (id === '') {
+        sendJson(response, 400, { error: 'id is required' })
+        return
+      }
+      const saved = await runtime.getWorkflow(id)
+      if (saved === undefined) {
+        sendJson(response, 404, { error: `workflow "${id}" not found` })
+        return
+      }
+      // Force TTS-Audio-Suite to rescan its voice library first: the process
+      // cache behind object_info's COMBO does not self-heal, so object_info
+      // can only report a voice that was added after the cache got invalidated
+      // once. Hitting the endpoint with refresh=1 invalidates it, making the
+      // options/numberKind read below genuinely current. Best-effort: servers
+      // without TTS-Audio-Suite (or unreachable) skip the call.
+      await runtime.refreshVoiceLibrary()
+      const client = runtime.createClient(await runtime.getApiKey())
+      const objectInfo = await client.objectInfo().catch(() => undefined)
+      // Re-derive only the object_info-derived fields; the parameter set
+      // (including user-added advanced parameters) is preserved as saved.
+      const { parameters, changed } = refreshParameterMetadata(
+        saved.parameters ?? [],
+        objectInfo,
+        saved.workflow,
+      )
+      const result = await runtime.saveWorkflow({
+        id: saved.id,
+        name: saved.name,
+        description: saved.description,
+        workflow: saved.workflow,
+        parameters,
+        source: saved.source,
+        comfyuiFile: saved.comfyuiFile,
+        tags: saved.tags,
+      })
+      if (!result.ok) {
+        sendJson(response, 400, { error: result.error })
+        return
+      }
+      sendJson(response, 200, { ok: true, parameters, changed })
     }),
   }))
 

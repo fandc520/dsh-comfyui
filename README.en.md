@@ -22,7 +22,7 @@
 
 - `comfyui_run` — submit a ComfyUI API-format workflow, or pick a built-in template, and get the generated media back. Two modes: `sync` (wait and return media) and `async` (start a background job, collect with `job_output` — ideal for video).
 - `comfyui_object_info` — list the node definitions of your ComfyUI server so the agent can build valid workflows on the fly.
-- `comfyui_workflow` — list and run runnable workflows from the plugin library. `action: list` also reports graph workflows you saved on the ComfyUI server and whether each has been **extracted** into runnable workflows; unextracted graphs are flagged so the agent tells you to extract them in the panel first.
+- `comfyui_workflow` — list and run runnable workflows from the plugin library. `action: list` also reports your ComfyUI server address and local install dirs (the `env` field), plus graph workflows you saved on the ComfyUI server and whether each has been **extracted** into runnable workflows; unextracted graphs are flagged so the agent tells you to extract them in the panel first. `action: refresh` re-derives one workflow's parameter snapshot by id and saves it back (force-rescans the TTS voice library first, then updates option/number metadata from the current node definitions) — run it after the voice library or node definitions changed.
 
 ### UI panel
 
@@ -66,13 +66,13 @@ Results render as a media wall (images/videos with download links) right in the 
 
 ### Settings page
 
-A ComfyUI section in the DH settings where you can edit the server URL (`baseUrl`), API-key env var (`apiKeyEnv`), media base URL (`mediaHost`), test the connection, and switch the plugin UI language (Chinese / English — stored in the browser, applies to the whole plugin UI), all without touching `cordis.yml`. The data directory and asset cap are configured in `cordis.yml` only and are not exposed in the settings page.
+A ComfyUI section in the DH settings where you can edit the server URL (`baseUrl`), API-key env var (`apiKeyEnv`), media base URL (`mediaHost`), the local ComfyUI install directories (`comfyuiDirs`, multiple allowed — mapped dirs / multiple installs; the agent uses them to locate your ComfyUI files and the TTS voice library without asking), test the connection, and switch the plugin UI language (Chinese / English — stored in the browser, applies to the whole plugin UI), all without touching `cordis.yml`. The data directory and asset cap are configured in `cordis.yml` only and are not exposed in the settings page.
 
 <p align="center"><img src="images/settings.png" width="70%" alt="ComfyUI settings page (with UI language switch)" title="ComfyUI settings page (with UI language switch)" /></p>
 
 ### Companion skill
 
-A runtime skill (`dsh-comfyui-workflows`) registered through `ctx.skills.register`: the agent learns the graph-vs-runnable model, canvas analysis rules (connected components, bypassed groups, dangling nodes), when to ask you about extract mode, and the extraction tech rules.
+A runtime skill (`dsh-comfyui-workflows`) registered through `ctx.skills.register`: the agent learns the graph-vs-runnable model, canvas analysis rules (connected components, bypassed groups, dangling nodes), when to ask you about extract mode, and the extraction tech rules. The skill also carries the **local environment** story (read `env.comfyuiDirs` from `comfyui_workflow list`) and the **TTS-Audio-Suite voice-library workflow** (one unified flow: refresh the snapshot first, then query — refresh via the `/api/tts-audio-suite/voice-library?refresh=1` endpoint plus `action: refresh` to re-derive and write the snapshot back; query prefers the HTTP endpoint, otherwise lists `{comfyuiDir}/models/voices` etc.; a new voice rejected at run time = stale snapshot), so the agent never has to dig through the plugin's source again.
 
 ### Graph workflows vs runnable workflows
 
@@ -98,6 +98,7 @@ Every runnable workflow carries an adjustable **parameter set** (`parameters`) s
 - **Boolean parameters use a checkbox**: pick `true` / `false` directly; at run time the `"true"` / `"false"` / `0` / `1` spellings are accepted too (defaults stored as strings by older versions are normalized instead of being silently dropped).
 - **Int vs. float number parameters**: the declared input type (`INT` / `FLOAT`) is read from the ComfyUI node definition, so FLOAT inputs like `cfg` or `denoise` accept decimals while INT inputs like `steps` or `seed` are rounded at run time; unknown types are treated as decimals. Each row shows `number/int` or `number/float`, with range and step in the tooltip.
 - **Agent-facing**: the parameter list is written into the workflow's input notes (`inputs` field) and shown by `comfyui_workflow` `action: list`; `action: run` accepts `parameters: {"prompt": "...", "seed": 42}` overrides — explicit values win over random/default, omitted parameters use their defaults.
+- **Parameter snapshot & refresh**: a parameter's options/number metadata (`options`, `numberKind`, …) is copied from the ComfyUI node definitions **at save time** and is never auto-updated afterwards (noticeable with growing lists like the voice library or uploaded files). Refresh it via `comfyui_workflow action: refresh { id }`, or — from other programs — the same-origin route `POST /comfyui/workflows/refresh-params` (body `{ "id": ... }`). Refreshing only touches derived fields; your hand-added advanced parameters and authored defaults are preserved. Until refreshed, `action: list` may be missing new voices and `action: run` will reject them.
 - **Load-area integration**: an unset image-type parameter is filled with the load-area's current source image, and unset `width`/`height` are auto-matched to that image's recorded pixel size. Explicit values always win, so the agent can still override both.
 
 ## Requirements
@@ -155,6 +156,8 @@ The plugin reads a `comfyui` section from `cordis.yml` (or the settings page):
     maxAssets: 200
     mediaHost: ''
     outputDir: ''
+    comfyuiDirs:
+      - 'D:\ComfyUI'
 ```
 
 | Key | Default | Description |
@@ -170,6 +173,7 @@ The plugin reads a `comfyui` section from `cordis.yml` (or the settings page):
 | `maxAssets` | `200` | Max entries kept in the asset index |
 | `mediaHost` | `''` (auto-detect) | External base URL for generated media (e.g. `http://192.168.1.5:3080`); empty auto-uses the origin the browser actually reaches this server with |
 | `outputDir` | `''` (inferred) | ComfyUI's output directory on this machine, used to locate files when deleting an asset; empty infers it from the paths ComfyUI reports, and deletion falls back to removing the index record when it cannot (e.g. a remote ComfyUI) |
+| `comfyuiDirs` | `[]` | Local ComfyUI install root(s) (multiple allowed: mapped dirs / multiple installs). The agent reads them via `env.comfyuiDirs` from `comfyui_workflow list` to locate models, custom nodes and the TTS-Audio-Suite voice library directly |
 
 ## Roadmap & design boundaries
 

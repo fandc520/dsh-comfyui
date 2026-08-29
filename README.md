@@ -22,7 +22,7 @@
 
 - `comfyui_run` —— 提交 ComfyUI API 格式的工作流，或选用内置模板，返回生成的媒体。两种模式：`sync`（等待并返回媒体）与 `async`（后台任务，用 `job_output` 收集结果——视频生成强烈建议）。
 - `comfyui_object_info` —— 列出你的 ComfyUI 服务器支持的节点定义，让 Agent 能当场构造合法的工作流。
-- `comfyui_workflow` —— 列出并运行插件库中的可运行工作流。`action: list` 还会报告你在 ComfyUI 端保存的图工作流以及每个是否已**提取**出可运行执行流；未提取的会明确标注，Agent 会先转告你在面板里点"提取"。
+- `comfyui_workflow` —— 列出并运行插件库中的可运行工作流。`action: list` 还会报告你的 ComfyUI 服务器地址与本机 ComfyUI 目录（`env` 字段），以及你在 ComfyUI 端保存的图工作流和每个是否已**提取**出可运行执行流；未提取的会明确标注，Agent 会先转告你在面板里点"提取"。`action: refresh` 按 id 重算某个工作流的参数快照并写回（先强制 TTS 音色库重扫，再按最新节点定义更新参数的选项/数值声明）——音色库或节点定义变更后跑它。
 
 ### UI 面板
 
@@ -66,13 +66,13 @@
 
 ### 设置页
 
-DH 设置里新增 "ComfyUI" 分区：改服务器地址（`baseUrl`）、API Key 环境变量名（`apiKeyEnv`）、媒体访问地址（`mediaHost`）、测试连接，并可切换插件界面语言（中文 / English——存于浏览器，作用于整个插件 UI），无需改动 `cordis.yml`。数据目录与资产上限只通过 `cordis.yml` 配置，不在设置页暴露。
+DH 设置里新增 "ComfyUI" 分区：改服务器地址（`baseUrl`）、API Key 环境变量名（`apiKeyEnv`）、媒体访问地址（`mediaHost`）、本机 ComfyUI 安装目录（`comfyuiDirs`，可多条——目录映射 / 多实例；Agent 据此直接定位你的 ComfyUI 文件与 TTS 音色库，无需再询问）、测试连接，并可切换插件界面语言（中文 / English——存于浏览器，作用于整个插件 UI），无需改动 `cordis.yml`。数据目录与资产上限只通过 `cordis.yml` 配置，不在设置页暴露。
 
 <p align="center"><img src="images/settings.png" width="70%" alt="ComfyUI 设置页（含界面语言切换）" title="ComfyUI 设置页（含界面语言切换）" /></p>
 
 ### 配套 skill
 
-通过 `ctx.skills.register` 注册的运行时 skill（`dsh-comfyui-workflows`）：让 Agent 掌握图工作流 vs 执行流的概念、画布分析规则（连通分量、绕过组、悬空节点）、何时该询问你提取方式，以及图→API 提取的技术规则。
+通过 `ctx.skills.register` 注册的运行时 skill（`dsh-comfyui-workflows`）：让 Agent 掌握图工作流 vs 执行流的概念、画布分析规则（连通分量、绕过组、悬空节点）、何时该询问你提取方式，以及图→API 提取的技术规则。skill 还附带了**本机环境**说明（从 `comfyui_workflow list` 的 `env` 读你的 ComfyUI 目录）与**TTS-Audio-Suite 音色库查询**（统一流程：先刷新快照再查询——刷新用 ComfyUI 的 `/api/tts-audio-suite/voice-library?refresh=1` + `action: refresh` 重算写回快照，查询优先走 HTTP 接口、其次直接列 `{comfyuiDir}/models/voices` 等目录；新音色运行被拒 = 快照过期），Agent 不必反复翻插件源码。
 
 ### 图工作流 vs 可运行工作流（提取执行流）
 
@@ -98,6 +98,7 @@ ComfyUI 分两层：
 - **布尔参数用勾选框编辑**：`true` / `false` 直接点选；运行时也接受 `"true"` / `"false"` / `0` / `1` 这些写法（旧版本存成字符串的默认值会自动归一，不再被静默忽略）。
 - **数字参数区分整数/小数**：从 ComfyUI 节点定义读取输入的声明类型（`INT` / `FLOAT`），`cfg`、`denoise` 这类 FLOAT 参数可直接填小数，`steps`、`seed` 这类 INT 参数在运行时四舍五入；类型未知时按小数处理。参数行会标出 `number/int`、`number/float`，鼠标悬停显示取值范围与步长。
 - **Agent 感知**：参数清单自动写入工作流的"参数说明"（`inputs` 字段），`comfyui_workflow` 工具的 `action: list` 会展示；`action: run` 接受 `parameters: {"prompt": "...", "seed": 42}` 覆盖——显式传值优先于随机/默认，未传参数用默认值。
+- **参数快照与刷新**：每个参数的选项/数值声明（`options`、`numberKind` 等）在**保存工作流那一刻**从 ComfyUI 节点定义拷贝，之后不会自动更新（音色库、上传文件这类会长大的列表尤其明显）。刷新手段：Agent 用 `comfyui_workflow action: refresh { id }`；其他程序可调同源路由 `POST /comfyui/workflows/refresh-params`（body `{ "id": ... }`）。刷新只更新派生字段，**不会**动你手动加的高级参数与默认值；不刷新时，`action: list` 的选项可能缺新音色、`action: run` 传新音色会被拒绝。
 - **加载区联动**：未显式指定的加载参数按加载位顺序自动填入（同类型匹配）；未传的 `width`/`height` 自动匹配源图记录的像素尺寸。显式传值始终优先，Agent 仍可覆盖两者，并能从 `action: list` 的 `loadArea` 字段看到用户加载了什么。
 
 ## 环境要求
@@ -155,6 +156,8 @@ Agent 会选用模板，或用 `comfyui_object_info` 探查你的服务器，或
     maxAssets: 200
     mediaHost: ''
     outputDir: ''
+    comfyuiDirs:
+      - 'D:\ComfyUI'
 ```
 
 | 键 | 默认值 | 说明 |
@@ -170,6 +173,7 @@ Agent 会选用模板，或用 `comfyui_object_info` 探查你的服务器，或
 | `maxAssets` | `200` | 资产索引最多保留的条数 |
 | `mediaHost` | `''`（自动检测） | 生成媒体的外网访问基址（如 `http://192.168.1.5:3080`）；留空自动使用浏览器实际访问本服务器的地址 |
 | `outputDir` | `''`（自动推断） | ComfyUI 在本机的输出目录，删除资产时用它定位文件；留空则从 ComfyUI 返回的文件路径自动推断，推断不出（如远程部署）时只删索引记录 |
+| `comfyuiDirs` | `[]` | 本机 ComfyUI 安装目录列表（可多条：目录映射 / 多实例）。Agent 通过 `comfyui_workflow list` 的 `env.comfyuiDirs` 读取，据此定位 models、自定义节点与 TTS-Audio-Suite 音色库等文件 |
 
 ## Roadmap 与设计边界
 

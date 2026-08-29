@@ -168,6 +168,21 @@ export class ComfyUIClient {
     }
   }
 
+  /** Best-effort GET of an arbitrary JSON endpoint on the ComfyUI server.
+   *
+   * Used to force TTS-Audio-Suite's voice-library rescan, a custom-node API
+   * route that is not part of the core API. Resolves true when the request
+   * succeeds, false on any failure (404 on servers without the route, auth,
+   * network). The response body is discarded. */
+  async getOk(path: string, timeoutMs?: number): Promise<boolean> {
+    try {
+      await this.request<unknown>(path, {}, timeoutMs)
+      return true
+    } catch {
+      return false
+    }
+  }
+
   /** Upload a file (multipart body forwarded verbatim) into ComfyUI's input directory. */
   /** Forward a multipart/form-data upload body verbatim (the browser's own
    * form, field "image", as ComfyUI's /upload/image expects it). */

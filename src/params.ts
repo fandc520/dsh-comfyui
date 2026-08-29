@@ -490,6 +490,63 @@ export function analyzeWorkflowParameters(workflow: Workflow, objectInfo?: Recor
   return params
 }
 
+/** Whether two parameters share the same object_info-derived fields. */
+function sameDerivedFields(a: WorkflowParameter, b: WorkflowParameter): boolean {
+  if (a.numberKind !== b.numberKind || a.min !== b.min || a.max !== b.max || a.step !== b.step) return false
+  const aOptions = a.options
+  const bOptions = b.options
+  if (aOptions === undefined || bOptions === undefined) return aOptions === bOptions
+  if (aOptions.length !== bOptions.length) return false
+  for (let i = 0; i < aOptions.length; i += 1) {
+    if (aOptions[i] !== bOptions[i]) return false
+  }
+  return true
+}
+
+/**
+ * Recompute the object_info-derived fields (options, numberKind, min/max/step)
+ * of existing parameters against a fresh object_info snapshot, keeping the
+ * parameter set itself untouched.
+ *
+ * Why this exists: a saved workflow's parameter list is written once at
+ * save/analyze time (workflows.json) and never sees object_info again, so a
+ * voice library or loader attachment that grew since then would reject the
+ * fresh value at run time (the options check in applyWorkflowParameters). The
+ * panel dropdown has no such problem — it re-reads object_info on every open —
+ * which is why refreshing is an explicit step (TTS voice-library rescan +
+ * object_info) rather than a silent auto-update.
+ *
+ * Only fields derived from object_info change. id/name/label/type/default/
+ * random/upload/subfolder and the parameter *set* stay exactly as saved, so
+ * user-added advanced parameters and their authored defaults survive. A
+ * parameter whose node/input is unknown to the fresh object_info (unregistered
+ * node, DynamicCombo child keys nested under a parent) keeps its stored
+ * values. Returns the copy and the names whose derived fields changed.
+ */
+export function refreshParameterMetadata(
+  parameters: WorkflowParameter[],
+  objectInfo: Record<string, unknown> | undefined,
+  workflow: Workflow,
+): { parameters: WorkflowParameter[]; changed: string[] } {
+  if (objectInfo === undefined || parameters.length === 0) return { parameters, changed: [] }
+  const changed: string[] = []
+  const refreshed = parameters.map((param) => {
+    const node = workflow[param.nodeId]
+    if (node === undefined) return param
+    if (inputSpec(objectInfo, node.class_type, param.inputKey) === undefined) return param
+    const next: WorkflowParameter = { ...param }
+    next.options = inputOptions(objectInfo, node.class_type, param.inputKey)
+    const numberSpec = numberSpecOf(objectInfo, node.class_type, param.inputKey)
+    next.numberKind = numberSpec?.kind
+    next.min = numberSpec?.min
+    next.max = numberSpec?.max
+    next.step = numberSpec?.step
+    if (!sameDerivedFields(param, next)) changed.push(param.name)
+    return next
+  })
+  return { parameters: refreshed, changed }
+}
+
 /**
  * Apply caller-provided values (and randomized seeds) onto a copy of the
  * workflow. Unknown parameters are ignored; omitted ones fall back to the

@@ -13,7 +13,7 @@ import type { AssetRecord, LoadSlot, StoredWorkflow } from './store.js'
 import type { GraphAnalysis } from './analyze.js'
 import type { RunProgress } from './progress.js'
 import type { QueuedRun } from './queue.js'
-import type { WorkflowParameter } from './params.js'
+import { refreshParameterMetadata, type Workflow, type WorkflowParameter } from './params.js'
 import type { HostHint } from './host-hint.js'
 
 /** A workflow saved on the ComfyUI server (userdata/workflows), with extract status. */
@@ -71,6 +71,10 @@ export interface ComfyUIRuntime {
   }): Promise<{ ok: true; workflow: StoredWorkflow } | { ok: false; error: string }>
   /** Delete a workflow from the library; false when it did not exist. */
   deleteWorkflow(id: string): Promise<boolean>
+  /** Force TTS-Audio-Suite to rescan its voice library (best-effort; false
+   * when the server has no such endpoint). Call before re-deriving parameter
+   * snapshots so object_info reports newly added voices. */
+  refreshVoiceLibrary(): Promise<boolean>
   /** Pixel sizes of panel-uploaded files, keyed by file name. */
   listMediaSizes(): Promise<Record<string, { width: number; height: number }>>
   /** Record the pixel size of one uploaded file. */
@@ -484,11 +488,12 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
       'It also lists workflows the user saved on the ComfyUI server (衍生主题: UI graph format canvases). A graph may hold SEVERAL independent flows; each is extracted into its own runnable workflow in the panel (整体/按分量/主流程). A graph with no extracted workflow yet cannot run — tell the user to open the ComfyUI panel and 提取 it first.',
       '`action: run` runs one saved workflow by id — pass only the id plus parameter overrides; the plugin submits the saved workflow JSON itself (never copy the JSON into your reply). It waits for media by default; add `mode: "async"` to run in the background and collect the result with job_output.',
       '`action: get` returns one saved workflow\'s complete API-format JSON by id for inspection/diagnostics only — it consumes many tokens and is not the run path.',
+      '`action: refresh` re-derives one saved workflow\'s parameter snapshot (options / numberKind / min/max/step) from the current node definitions and saves it back. Run it after the TTS-Audio-Suite voice library or node definitions changed: saved workflows snapshot their parameter options at save time, so a freshly added voice is not accepted by `action: run` until the snapshot catches up. It force-rescans the TTS voice library first, then updates only the fields derived from object_info — the parameter set (including user-added advanced parameters) is preserved. Returns `changed` with the parameter names that actually changed.',
     ].join(' '),
     parameters: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['list', 'run', 'get'], description: 'list returns the workflow library; run executes one workflow by id (direct call to the saved JSON); get returns one workflow\'s full JSON for inspection.' },
+        action: { type: 'string', enum: ['list', 'run', 'get', 'refresh'], description: 'list returns the workflow library; run executes one workflow by id (direct call to the saved JSON); get returns one workflow\'s full JSON for inspection; refresh re-derives one workflow\'s parameter snapshot from the current node definitions and saves it back.' },
         id: { type: 'string', description: 'Workflow id (required for action: run and get).' },
         mode: { type: 'string', enum: ['sync', 'async'], description: 'run mode (default sync); async starts a background job and returns its id for job_output. Video/audio workflows should use async — generation takes minutes and sync may time out.' },
         timeout_ms: { type: 'number', minimum: 5_000, maximum: 3_600_000, description: 'Generation wait budget in ms (default 900000 = 15 min). Video needs minutes; raise this for long videos.' },
@@ -504,6 +509,7 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
       render(_args, value) {
         const data = value as {
           action: string
+          env?: { baseUrl: string; comfyuiDirs: string[] }
           workflows?: Array<{ id: string; name: string; description: string; parameters?: Array<{ name: string; label: string; type: string; default?: string | number | boolean; random?: boolean; numberKind?: 'int' | 'float'; options?: Array<string | number>; upload?: 'image' | 'video' | 'audio' | 'media'; subfolder?: string }> }>
           comfyuiWorkflows?: Array<{ name: string; extracted: boolean; derived: Array<{ libraryId: string; name: string }> }>
           loadArea?: { slots: number; loaded: number; items: Array<{ name: string; kind: string; source: string }> }
@@ -512,6 +518,8 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
           name?: string
           workflow?: unknown
           background?: BackgroundResult
+          changed?: string[]
+          parameterCount?: number
         }
         if (data.action === 'get') {
           return [{ type: 'text', text: `ComfyUI workflow ${data.name ?? data.id}: ${JSON.stringify(data.workflow)}` }]
@@ -519,8 +527,23 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
         if (data.background !== undefined) {
           return [{ type: 'text', text: `ComfyUI workflow started in the background (job ${data.background.jobId}, prompt ${data.background.promptId}). Collect the result with job_output.` }]
         }
+        if (data.action === 'refresh') {
+          const changed = data.changed ?? []
+          const changedText = changed.length > 0
+            ? `更新了 ${changed.length} 个参数的 options / 数值声明：${changed.join('、')}`
+            : 'options 与数值声明与最新节点定义一致，没有变化'
+          return [{ type: 'text', text: `ComfyUI workflow ${data.name ?? data.id}：参数快照已刷新（${data.parameterCount ?? 0} 个参数原样保留），${changedText}` }]
+        }
         if (data.action === 'list') {
-          const lines = [`Saved ComfyUI workflows (${data.workflows?.length ?? 0}):`]
+          const lines: string[] = []
+          const env = data.env
+          if (env !== undefined) {
+            // The model's local-env one-liner: the ComfyUI server address and
+            // the user's ComfyUI install dirs, so it never has to ask where
+            // files live (TTS-Audio-Suite voice library etc.).
+            lines.push(`ComfyUI 服务器: ${env.baseUrl}；本机 ComfyUI 目录: ${env.comfyuiDirs.length > 0 ? env.comfyuiDirs.join('；') : '未配置（设置页 comfyuiDirs 可填写）'}`)
+          }
+          lines.push(`Saved ComfyUI workflows (${data.workflows?.length ?? 0}):`)
           for (const workflow of data.workflows ?? []) {
             lines.push(`- ${workflow.id} — ${workflow.name}${workflow.description !== '' ? `: ${workflow.description}` : ''}`)
             for (const param of workflow.parameters ?? []) {
@@ -565,8 +588,8 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
     timeoutMs: TOOL_TIMEOUT_MS,
     async execute(args, exec) {
       const action = args.action
-      if (action !== 'list' && action !== 'run' && action !== 'get') {
-        throw new Error(`comfyui_workflow: action must be list, run, or get, got ${String(action)}`)
+      if (action !== 'list' && action !== 'run' && action !== 'get' && action !== 'refresh') {
+        throw new Error(`comfyui_workflow: action must be list, run, get, or refresh, got ${String(action)}`)
       }
       if (action === 'list') {
         const [workflows, comfyui, slots] = await Promise.all([
@@ -580,6 +603,14 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
         const loaded = slots.filter((slot): slot is NonNullable<LoadSlot> => slot !== null)
         return {
           action: 'list',
+          // Local environment the model can rely on: the ComfyUI server
+          // address and the user's ComfyUI install dirs (configured in the
+          // settings page comfyuiDirs). Fresh on every call, so config
+          // changes show up without restarting DSH.
+          env: {
+            baseUrl: runtime.getConfig().baseUrl,
+            comfyuiDirs: runtime.getConfig().comfyuiDirs,
+          },
           loadArea: {
             slots: slots.length,
             loaded: loaded.length,
@@ -608,7 +639,7 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
       }
       const id = args.id
       if (typeof id !== 'string' || id === '') {
-        throw new Error('comfyui_workflow: id is required for action: run and get')
+        throw new Error('comfyui_workflow: id is required for action: run, get and refresh')
       }
       const saved = await runtime.getWorkflow(id)
       if (saved === undefined) {
@@ -622,6 +653,40 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
           description: saved.description,
           parameters: saved.parameters ?? [],
           workflow: saved.workflow,
+        }
+      }
+      if (action === 'refresh') {
+        // The library snapshot is captured at save time and never re-reads
+        // object_info, so a voice library that grew since then would reject
+        // the new voice at run time. Force the TTS rescan first (the object_info
+        // COMBO does not self-heal), then re-derive the derived fields only.
+        await runtime.refreshVoiceLibrary()
+        const client = runtime.createClient(await runtime.getApiKey())
+        const objectInfo = await client.objectInfo().catch(() => undefined)
+        const { parameters, changed } = refreshParameterMetadata(
+          saved.parameters ?? [],
+          objectInfo,
+          saved.workflow,
+        )
+        const result = await runtime.saveWorkflow({
+          id: saved.id,
+          name: saved.name,
+          description: saved.description,
+          workflow: saved.workflow,
+          parameters,
+          source: saved.source,
+          comfyuiFile: saved.comfyuiFile,
+          tags: saved.tags,
+        })
+        if (!result.ok) {
+          throw new Error(`comfyui_workflow: refresh failed: ${result.error}`)
+        }
+        return {
+          action: 'refresh',
+          id: saved.id,
+          name: saved.name,
+          parameterCount: parameters.length,
+          changed,
         }
       }
       const config = runtime.getConfig()
