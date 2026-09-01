@@ -6,7 +6,7 @@
  * (the overlay layer is click-through, so nothing blocks the app underneath).
  */
 import { createElement as h, useCallback, useEffect, useRef, useState } from 'react'
-import { getJson, postJson } from './api.ts'
+import { getJson, postJson, postRaw } from './api.ts'
 import { panelStore, usePanelOpen, usePanelTab } from './panel-store.ts'
 import { ComfyUIIcon } from './trigger.tsx'
 import { Lightbox } from './lightbox.js'
@@ -75,7 +75,55 @@ interface WorkflowEntry {
   workflow: Record<string, unknown>
   parameters?: WorkflowParameter[]
   tags?: string[]
+  /** Skill-pack directory name; present when this workflow has a pack. */
+  skillDir?: string
+  /** Whether the agent must read the pack before running this workflow. */
+  requireSkill?: boolean
   updatedAt: string
+}
+
+/** One file inside a workflow's skill pack. */
+interface SkillPackFile {
+  path: string
+  size: number
+  updatedAt: string
+}
+
+/** A workflow's skill pack as the routes report it. */
+interface SkillPack {
+  slug: string
+  dir: string
+  summary: string
+  files: SkillPackFile[]
+  /** Sub-directories present in the pack, including empty ones. */
+  dirs: string[]
+  totalBytes: number
+  workflowId: string
+  workflowName: string
+  required: boolean
+}
+
+interface SkillPackResponse {
+  ok?: boolean
+  enabled?: boolean
+  root?: string
+  /** Suggested directory names; the host owns the list. */
+  presetDirs?: string[]
+  pack?: SkillPack | null
+  error?: string
+}
+
+/** Fallback suggestions when the config route has not answered yet; the
+ * authoritative list comes from the host (`presetDirs`). */
+const SKILL_FALLBACK_DIRS = ['references', 'scripts', 'assets']
+
+/** Imported binaries land in assets/; the editor previews these instead of
+ * trying to read them as text. */
+const SKILL_IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg']
+
+function isSkillImage(path: string): boolean {
+  const dot = path.lastIndexOf('.')
+  return dot !== -1 && SKILL_IMAGE_EXTENSIONS.includes(path.slice(dot).toLowerCase())
 }
 
 /** Preset workflow classification tags (users can add custom ones). Stored as
@@ -1508,6 +1556,523 @@ function TagEditor(props: {
   )
 }
 
+/**
+ * The skill-pack editor for one workflow: attach/detach the pack, toggle the
+ * run-time gate, and manage its files (SKILL.md plus references/ and scripts/).
+ *
+ * The pack is what `comfyui_workflow action: skill` hands the agent, so this
+ * view is the only place its content is authored. Each file saves explicitly —
+ * no autosave — because the model reads whatever is on disk the moment it asks.
+ * SKILL.md is edited as a summary field plus a body: the `---` frontmatter that
+ * carries the summary is composed on the host, never typed here.
+ */
+function SkillPackEditor(props: {
+  t: ComfyUIPanelProps['t']
+  workflow: WorkflowEntry
+  onBack: () => void
+  onChanged: () => void
+}): ReturnType<typeof h> {
+  const { t } = props
+  const [pack, setPack] = useState<SkillPack | null>(null)
+  const [enabled, setEnabled] = useState<boolean>(props.workflow.skillDir !== undefined)
+  const [active, setActive] = useState<string>('SKILL.md')
+  const [summary, setSummary] = useState<string>('')
+  const [text, setText] = useState<string>('')
+  const [dirty, setDirty] = useState<boolean>(false)
+  const [pendingOpen, setPendingOpen] = useState<string | null>(null)
+  const [creating, setCreating] = useState<{ bucket: string; name: string } | null>(null)
+  const [creatingDir, setCreatingDir] = useState<string | null>(null)
+  const [presetDirs, setPresetDirs] = useState<string[]>(SKILL_FALLBACK_DIRS)
+  const [renaming, setRenaming] = useState<{ from: string; to: string } | null>(null)
+  const [confirming, setConfirming] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+
+  /** Load one file into the editor; SKILL.md arrives pre-split into summary + body. */
+  const openFile = useCallback(async (path: string): Promise<void> => {
+    // Images are shown, not edited: reading one as UTF-8 would only produce
+    // garbage in the textarea.
+    if (isSkillImage(path)) {
+      setActive(path)
+      setSummary('')
+      setText('')
+      setDirty(false)
+      setError(null)
+      return
+    }
+    try {
+      const data = await getJson<{ ok?: boolean; content?: string; summary?: string; body?: string; error?: string }>(
+        `/comfyui/workflows/skill?id=${encodeURIComponent(props.workflow.id)}&path=${encodeURIComponent(path)}`,
+      )
+      if (data.ok !== true) {
+        setError(data.error ?? t('skillReadFailed'))
+        return
+      }
+      setActive(path)
+      if (path === 'SKILL.md') {
+        setSummary(data.summary ?? '')
+        setText(data.body ?? '')
+      } else {
+        setSummary('')
+        setText(data.content ?? '')
+      }
+      setDirty(false)
+      setError(null)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }, [props.workflow.id, t])
+
+  /** Re-read the pack listing, then the requested file. */
+  const refresh = useCallback(async (path?: string): Promise<void> => {
+    try {
+      const data = await getJson<SkillPackResponse>(`/comfyui/workflows/skill?id=${encodeURIComponent(props.workflow.id)}`)
+      setEnabled(data.enabled === true)
+      setPack(data.pack ?? null)
+      if (Array.isArray(data.presetDirs) && data.presetDirs.length > 0) setPresetDirs(data.presetDirs)
+      if (data.enabled === true) await openFile(path ?? 'SKILL.md')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }, [props.workflow.id, openFile])
+
+  useEffect(() => {
+    void refresh()
+  }, [refresh])
+
+  /** Every mutation goes through here so the listing and the flags stay in sync. */
+  const mutate = async (body: Record<string, unknown>, after?: string): Promise<boolean> => {
+    setBusy(true)
+    setNotice(null)
+    try {
+      const data = (await postJson('/comfyui/workflows/skill', { id: props.workflow.id, ...body })) as SkillPackResponse
+      if (data.ok !== true) {
+        setError(data.error ?? t('skillFailed'))
+        return false
+      }
+      setEnabled(data.enabled === true)
+      setPack(data.pack ?? null)
+      setError(null)
+      props.onChanged()
+      if (after !== undefined && data.enabled === true) await openFile(after)
+      return true
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const saveFile = async (): Promise<boolean> => {
+    const body: Record<string, unknown> = { action: 'write', path: active, content: text }
+    if (active === 'SKILL.md') body.summary = summary
+    const ok = await mutate(body)
+    if (ok) {
+      setDirty(false)
+      setNotice(`${t('skillSaved')} ${active}`)
+    }
+    return ok
+  }
+
+  /** Switching files with unsaved edits parks the request until the user decides. */
+  const selectFile = (path: string): void => {
+    if (path === active) return
+    if (dirty) {
+      setPendingOpen(path)
+      return
+    }
+    void openFile(path)
+  }
+
+  const createFile = async (): Promise<void> => {
+    if (creating === null) return
+    const name = creating.name.trim()
+    if (name === '') return
+    const path = `${creating.bucket}/${name.includes('.') ? name : `${name}.md`}`
+    const ok = await mutate({ action: 'write', path, content: '' }, path)
+    if (ok) setCreating(null)
+  }
+
+  /** Open the pack directory in the desktop file manager (on the machine
+   * running DSH — the hint says so, and the path stays visible below). */
+  const revealDir = async (): Promise<void> => {
+    setNotice(null)
+    try {
+      const data = (await postJson('/comfyui/workflows/skill/reveal', { id: props.workflow.id })) as { ok?: boolean; error?: string; dir?: string }
+      if (data.ok !== true) {
+        setError(data.error ?? t('skillFailed'))
+        return
+      }
+      setError(null)
+      setNotice(`${t('skillRevealed')} ${data.dir ?? ''}`)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
+  const createDir = async (): Promise<void> => {
+    if (creatingDir === null) return
+    const name = creatingDir.trim()
+    if (name === '') return
+    const ok = await mutate({ action: 'mkdir', name })
+    if (ok) {
+      setCreatingDir(null)
+      setNotice(`${t('skillDirCreated')} ${name}/`)
+    }
+  }
+
+  const applyRename = async (): Promise<void> => {
+    if (renaming === null) return
+    const to = renaming.to.trim()
+    if (to === '') return
+    const bucket = renaming.from.includes('/') ? `${renaming.from.split('/')[0] ?? ''}/` : ''
+    const target = to.includes('/') ? to : `${bucket}${to}`
+    const ok = await mutate({ action: 'rename', path: renaming.from, to: target }, target)
+    if (ok) setRenaming(null)
+  }
+
+  /** Import local files into the pack. The destination bucket comes from the
+   * host (one extension rule, shared with the agent-facing listing), so the
+   * panel only sends the name and the bytes. */
+  const importFiles = async (files: File[]): Promise<void> => {
+    if (files.length === 0) return
+    setBusy(true)
+    setNotice(null)
+    let imported: string | null = null
+    let failed = 0
+    for (const file of files) {
+      try {
+        const bytes = await file.arrayBuffer()
+        const data = (await postRaw(
+          `/comfyui/workflows/skill/import?id=${encodeURIComponent(props.workflow.id)}&name=${encodeURIComponent(file.name)}`,
+          bytes,
+        )) as SkillPackResponse & { path?: string }
+        if (data.ok !== true) {
+          failed += 1
+          setError(data.error ?? t('skillFailed'))
+          continue
+        }
+        setPack(data.pack ?? null)
+        imported = data.path ?? null
+      } catch (cause) {
+        failed += 1
+        setError(cause instanceof Error ? cause.message : String(cause))
+      }
+    }
+    setBusy(false)
+    props.onChanged()
+    if (imported !== null) {
+      if (failed === 0) {
+        setError(null)
+        setNotice(`${t('skillImported')} ${imported}`)
+      }
+      await openFile(imported)
+    }
+  }
+
+  const head = h('div', { className: 'dsc-view-head' },
+    h('button', { className: 'dsc-btn', onClick: props.onBack }, t('wfViewBack')),
+    h('div', { className: 'dsc-wf-name', title: props.workflow.name }, `${t('skillTitle')} · ${props.workflow.name}`),
+  )
+
+  if (!enabled) {
+    return h('div', null,
+      head,
+      h('div', { className: 'dsc-hint' }, t('skillIntro')),
+      error !== null ? h(ErrorNote, { t, message: error }) : null,
+      h('div', { className: 'dsc-row' },
+        h('button', { className: 'dsc-btn', disabled: busy, onClick: () => void mutate({ action: 'enable' }, 'SKILL.md') }, t('skillEnable')),
+      ),
+    )
+  }
+
+  const files = pack?.files ?? []
+  // Directories come from disk, so a folder the user created by hand (or an
+  // empty one they just added) shows up exactly like a preset would. The list
+  // is unioned with the directories the file paths imply: a host that predates
+  // the `dirs` field would otherwise hide every sub-directory it does report
+  // files for.
+  const impliedDirs = files
+    .filter((file) => file.path.includes('/'))
+    .map((file) => file.path.split('/')[0] ?? '')
+    .filter((dir) => dir !== '')
+  const packDirs = [...new Set([...(pack?.dirs ?? []), ...impliedDirs])].sort((a, b) => a.localeCompare(b))
+  const buckets: Array<{ label: string; items: SkillPackFile[] }> = [
+    { label: '', items: files.filter((file) => !file.path.includes('/')) },
+    ...packDirs.map((bucket) => ({
+      label: bucket,
+      items: files.filter((file) => file.path.startsWith(`${bucket}/`)),
+    })),
+  ]
+  /** Where a new file may go: the pack's own directories first, then the
+   * presets it has not used yet. */
+  const targetDirs = [...packDirs, ...presetDirs.filter((dir) => !packDirs.includes(dir))]
+
+  const fileList = h('div', {
+    className: 'dsc-skill-files',
+    onDragOver: (event: { preventDefault: () => void }) => event.preventDefault(),
+    onDrop: (event: { preventDefault: () => void; dataTransfer?: { files?: File[] } }) => {
+      event.preventDefault()
+      const dropped = Array.from(event.dataTransfer?.files ?? [])
+      if (dropped.length > 0) void importFiles(dropped)
+    },
+  },
+    // Both actions sit at the top of the column: below a long file list they
+    // were easy to miss entirely.
+    h('div', { className: 'dsc-skill-actions' },
+      h('label', { className: 'dsc-btn dsc-btn--sm', title: t('skillImportHint') },
+        t('skillImport'),
+        h('input', {
+          type: 'file',
+          multiple: true,
+          style: { display: 'none' },
+          disabled: busy,
+          onChange: (event: { target: HTMLInputElement }) => {
+            const picked = Array.from(event.target.files ?? [])
+            event.target.value = ''
+            if (picked.length > 0) void importFiles(picked)
+          },
+        }),
+      ),
+      creating === null
+        ? h('button', {
+          className: 'dsc-btn dsc-btn--sm',
+          disabled: busy,
+          onClick: () => { setCreatingDir(null); setCreating({ bucket: targetDirs[0] ?? 'references', name: '' }) },
+        }, t('skillNewFile'))
+        : null,
+      creatingDir === null
+        ? h('button', {
+          className: 'dsc-btn dsc-btn--sm',
+          disabled: busy,
+          onClick: () => { setCreating(null); setCreatingDir('') },
+        }, t('skillNewDir'))
+        : null,
+      h('button', {
+        className: 'dsc-btn dsc-btn--sm',
+        disabled: busy,
+        title: t('skillRevealHint'),
+        onClick: () => void revealDir(),
+      }, t('skillReveal')),
+    ),
+    creatingDir === null
+      ? null
+      : h('div', { className: 'dsc-skill-create' },
+        h('input', {
+          className: 'dsc-input dsc-input--sm',
+          value: creatingDir,
+          placeholder: t('skillNewDirPlaceholder'),
+          onChange: (event: { target: { value: string } }) => setCreatingDir(event.target.value),
+          onKeyDown: (event: { key: string; preventDefault: () => void }) => {
+            if (event.key === 'Enter') { event.preventDefault(); void createDir() }
+          },
+        }),
+        h('div', { className: 'dsc-hint' }, t('skillNewDirHint', { presets: presetDirs.join(' / ') })),
+        h('div', { className: 'dsc-row' },
+          h('button', { className: 'dsc-btn dsc-btn--sm', disabled: busy, onClick: () => void createDir() }, t('skillCreate')),
+          h('button', { className: 'dsc-btn dsc-btn--sm', onClick: () => setCreatingDir(null) }, t('cancel')),
+        ),
+      ),
+    h('div', { className: 'dsc-skill-drop-hint' }, t('skillDropHint')),
+    buckets.map((bucket) => bucket.items.length === 0 && bucket.label !== ''
+      ? null
+      : h('div', { key: bucket.label === '' ? '.' : bucket.label, className: 'dsc-skill-bucket' },
+        bucket.label !== '' ? h('div', { className: 'dsc-skill-bucket-name' }, `${bucket.label}/`) : null,
+        bucket.items.map((file) => h('button', {
+          key: file.path,
+          className: `dsc-skill-file${file.path === active ? ' dsc-skill-file--active' : ''}`,
+          onClick: () => selectFile(file.path),
+        },
+          h('span', { className: 'dsc-skill-file-name' }, file.path.includes('/') ? file.path.split('/')[1] : file.path),
+          h('span', { className: 'dsc-skill-file-size' }, formatBytes(file.size)),
+        )),
+      )),
+    creating === null
+      ? null
+      : h('div', { className: 'dsc-skill-create' },
+        h('select', {
+          className: 'dsc-input dsc-input--sm',
+          value: creating.bucket,
+          onChange: (event: { target: { value: string } }) => setCreating({ ...creating, bucket: event.target.value }),
+        }, targetDirs.map((bucket) => h('option', { key: bucket, value: bucket }, `${bucket}/`))),
+        h('input', {
+          className: 'dsc-input dsc-input--sm',
+          value: creating.name,
+          placeholder: t('skillNewPlaceholder'),
+          onChange: (event: { target: { value: string } }) => setCreating({ ...creating, name: event.target.value }),
+          onKeyDown: (event: { key: string; preventDefault: () => void }) => {
+            if (event.key === 'Enter') { event.preventDefault(); void createFile() }
+          },
+        }),
+        h('div', { className: 'dsc-row' },
+          h('button', { className: 'dsc-btn dsc-btn--sm', disabled: busy, onClick: () => void createFile() }, t('skillCreate')),
+          h('button', { className: 'dsc-btn dsc-btn--sm', onClick: () => setCreating(null) }, t('cancel')),
+        ),
+      ),
+  )
+
+  const editor = h('div', { className: 'dsc-skill-main' },
+    h('div', { className: 'dsc-skill-editor-head' },
+      h('span', { className: 'dsc-skill-path' }, active),
+      dirty ? h('span', { className: 'dsc-badge dsc-badge--warn' }, t('skillDirty')) : null,
+    ),
+    active === 'SKILL.md'
+      ? h('div', { className: 'dsc-field' },
+        h('label', null, t('skillSummary')),
+        h('input', {
+          className: 'dsc-input',
+          value: summary,
+          placeholder: t('skillSummaryPlaceholder'),
+          onChange: (event: { target: { value: string } }) => { setSummary(event.target.value); setDirty(true) },
+        }),
+        h('div', { className: 'dsc-hint' }, t('skillSummaryHint')),
+      )
+      : null,
+    isSkillImage(active)
+      ? h('div', { className: 'dsc-skill-preview' },
+        h('img', {
+          src: `/comfyui/workflows/skill/raw?id=${encodeURIComponent(props.workflow.id)}&path=${encodeURIComponent(active)}`,
+          alt: active,
+        }),
+        h('div', { className: 'dsc-hint' }, t('skillImageHint')),
+      )
+      : h('textarea', {
+      className: 'dsc-textarea dsc-textarea--skill',
+      value: text,
+      spellCheck: false,
+      onChange: (event: { target: { value: string } }) => { setText(event.target.value); setDirty(true) },
+      onKeyDown: (event: { key: string; preventDefault: () => void; target: HTMLTextAreaElement }) => {
+        // Tab indents instead of leaving the field: these files hold scripts.
+        if (event.key !== 'Tab') return
+        event.preventDefault()
+        const area = event.target
+        const start = area.selectionStart
+        const end = area.selectionEnd
+        setText(`${text.slice(0, start)}  ${text.slice(end)}`)
+        setDirty(true)
+        window.requestAnimationFrame(() => {
+          area.selectionStart = start + 2
+          area.selectionEnd = start + 2
+        })
+      },
+      }),
+    h('div', { className: 'dsc-row' },
+      isSkillImage(active)
+        ? null
+        : h('button', { className: 'dsc-btn', disabled: busy || !dirty, onClick: () => void saveFile() }, t('skillSave')),
+      active !== 'SKILL.md'
+        ? h('button', { className: 'dsc-btn', disabled: busy, onClick: () => setRenaming({ from: active, to: active.includes('/') ? active.split('/')[1] ?? '' : active }) }, t('skillRename'))
+        : null,
+      active !== 'SKILL.md'
+        ? h('button', { className: 'dsc-btn', disabled: busy, onClick: () => setConfirming(active) }, t('skillDeleteFile'))
+        : null,
+    ),
+    confirming !== null && confirming !== '*pack*'
+      ? h('div', { className: 'dsc-dialog dsc-dialog--danger' },
+        h('div', { className: 'dsc-dialog-head dsc-danger-text' }, `${t('skillDeleteConfirm')} ${confirming}`),
+        h('div', { className: 'dsc-row' },
+          h('button', {
+            className: 'dsc-btn dsc-btn--danger',
+            disabled: busy,
+            onClick: () => {
+              const target = confirming
+              setConfirming(null)
+              void mutate({ action: 'delete', path: target }, 'SKILL.md')
+            },
+          }, t('confirmDelete')),
+          h('button', { className: 'dsc-btn', onClick: () => setConfirming(null) }, t('cancel')),
+        ),
+      )
+      : null,
+    renaming !== null
+      ? h('div', { className: 'dsc-skill-create' },
+        h('input', {
+          className: 'dsc-input dsc-input--sm',
+          value: renaming.to,
+          onChange: (event: { target: { value: string } }) => setRenaming({ ...renaming, to: event.target.value }),
+        }),
+        h('div', { className: 'dsc-row' },
+          h('button', { className: 'dsc-btn dsc-btn--sm', disabled: busy, onClick: () => void applyRename() }, t('skillRename')),
+          h('button', { className: 'dsc-btn dsc-btn--sm', onClick: () => setRenaming(null) }, t('cancel')),
+        ),
+      )
+      : null,
+  )
+
+  return h('div', null,
+    head,
+    h('div', { className: 'dsc-row dsc-skill-flags' },
+      h('label', { className: 'dsc-check' },
+        h('input', {
+          type: 'checkbox',
+          checked: pack?.required === true,
+          disabled: busy,
+          onChange: (event: { target: { checked: boolean } }) => void mutate({ action: 'require', required: event.target.checked }),
+        }),
+        t('skillRequired'),
+      ),
+      h('span', { className: 'dsc-hint' }, t('skillRequiredHint')),
+    ),
+    pack !== null ? h('div', { className: 'dsc-skill-dir', title: pack.dir }, `${t('skillDir')}: ${pack.dir}`) : null,
+    pendingOpen !== null
+      ? h('div', { className: 'dsc-dialog' },
+        h('div', { className: 'dsc-dialog-head' }, t('skillDirtyPrompt')),
+        h('div', { className: 'dsc-row' },
+          h('button', {
+            className: 'dsc-btn',
+            disabled: busy,
+            onClick: () => {
+              const target = pendingOpen
+              setPendingOpen(null)
+              void saveFile().then((ok) => { if (ok) void openFile(target) })
+            },
+          }, t('skillSaveAndSwitch')),
+          h('button', {
+            className: 'dsc-btn',
+            onClick: () => {
+              const target = pendingOpen
+              setPendingOpen(null)
+              setDirty(false)
+              void openFile(target)
+            },
+          }, t('skillDiscard')),
+          h('button', { className: 'dsc-btn', onClick: () => setPendingOpen(null) }, t('cancel')),
+        ),
+      )
+      : null,
+    notice !== null ? h('div', { className: 'dsc-ok' }, notice) : null,
+    error !== null ? h(ErrorNote, { t, message: error }) : null,
+    h('div', { className: 'dsc-skill' }, fileList, editor),
+    // Both confirmations render next to the button that opened them: a dialog
+    // pinned to the top of the view reads as "the page jumped", not as a
+    // question, and destroying a pack is unrecoverable.
+    h('div', { className: 'dsc-skill-footer' },
+      h('div', { className: 'dsc-row' },
+        h('button', { className: 'dsc-btn', disabled: busy, onClick: () => void mutate({ action: 'disable' }).then(() => props.onBack()) }, t('skillDetach')),
+        h('button', { className: 'dsc-btn dsc-btn--danger', disabled: busy, onClick: () => setConfirming('*pack*') }, t('skillDestroy')),
+      ),
+      confirming === '*pack*'
+        ? h('div', { className: 'dsc-dialog dsc-dialog--danger' },
+          h('div', { className: 'dsc-dialog-head dsc-danger-text' }, t('skillDestroyConfirm', { count: pack?.files.length ?? 0 })),
+          h('div', { className: 'dsc-row' },
+            h('button', {
+              className: 'dsc-btn dsc-btn--danger',
+              disabled: busy,
+              onClick: () => {
+                setConfirming(null)
+                void mutate({ action: 'destroy' }).then(() => props.onBack())
+              },
+            }, t('skillDestroyConfirmButton')),
+            h('button', { className: 'dsc-btn', onClick: () => setConfirming(null) }, t('cancel')),
+          ),
+        )
+        : null,
+    ),
+  )
+}
+
 function WorkflowsTab({ t }: ComfyUIPanelProps): ReturnType<typeof h> {
   const [list, setList] = useState<WorkflowEntry[] | null>(null)
   const [comfyui, setComfyui] = useState<ComfyUIWorkflowEntry[] | null>(null)
@@ -1519,6 +2084,9 @@ function WorkflowsTab({ t }: ComfyUIPanelProps): ReturnType<typeof h> {
   const [viewing, setViewing] = useState<WorkflowViewState | null>(null)
   const [extract, setExtract] = useState<ExtractState | null>(null)
   const [tagFilter, setTagFilter] = useState<string | null>(null)
+  const [skillFor, setSkillFor] = useState<WorkflowEntry | null>(null)
+  /** A delete waiting on the user's answer about the workflow's skill pack. */
+  const [deleting, setDeleting] = useState<WorkflowEntry | null>(null)
 
   const load = async (): Promise<void> => {
     try {
@@ -1621,17 +2189,27 @@ function WorkflowsTab({ t }: ComfyUIPanelProps): ReturnType<typeof h> {
     }
   }
 
-  const remove = async (id: string): Promise<void> => {
+  /** Delete a workflow. A workflow carrying a skill pack asks first: the pack
+   * holds hand-written notes that nothing else can restore. */
+  const remove = async (id: string, deleteSkill = false): Promise<void> => {
     setBusy(true)
     setError(null)
     try {
-      await postJson('/comfyui/workflows/delete', { id })
+      await postJson('/comfyui/workflows/delete', { id, deleteSkill })
       await load()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
       setBusy(false)
     }
+  }
+
+  const requestRemove = (workflow: WorkflowEntry): void => {
+    if (workflow.skillDir !== undefined) {
+      setDeleting(workflow)
+      return
+    }
+    void remove(workflow.id)
   }
 
   const openExtract = (file: string): void => {
@@ -1684,6 +2262,14 @@ function WorkflowsTab({ t }: ComfyUIPanelProps): ReturnType<typeof h> {
     }
   }
 
+  if (skillFor !== null) {
+    return h(SkillPackEditor, {
+      t,
+      workflow: skillFor,
+      onBack: () => { setSkillFor(null); void load() },
+      onChanged: () => { void load() },
+    })
+  }
   if (viewing !== null) {
     return h(WorkflowView, { t, file: viewing.file, graph: viewing.graph, onBack: () => setViewing(null) })
   }
@@ -1778,15 +2364,19 @@ function WorkflowsTab({ t }: ComfyUIPanelProps): ReturnType<typeof h> {
     h('div', { className: 'dsc-fold-body' },
       visibleTags.length > 0 || tagFilter !== null
         ? h('div', { className: 'dsc-tag-filter' },
-            h('button', {
-              className: `dsc-tag-chip${tagFilter === null ? ' dsc-tag-chip--active' : ''}`,
-              onClick: () => setTagFilter(null),
-            }, `${t('wfTagAll')} (${list.length})`),
-            visibleTags.map((tag) => h('button', {
-              key: tag,
-              className: `dsc-tag-chip${tagFilter === tag ? ' dsc-tag-chip--active' : ''}`,
-              onClick: () => setTagFilter(tagFilter === tag ? null : tag),
-            }, `${tag} (${tagCounts.get(tag) ?? 0})`)),
+            // A simple dropdown instead of a chip row: the library can grow
+            // many custom tags, and a horizontal strip of chips would push the
+            // workflow list down and visually crowd the toolbar. First option
+            // is always "all"; picking a tag filters, picking "all" clears.
+            h('select', {
+              className: 'dsc-input dsc-input--inline',
+              title: t('wfTags'),
+              value: tagFilter ?? '',
+              onChange: (event: { target: { value: string } }) => setTagFilter(event.target.value === '' ? null : event.target.value),
+            },
+              h('option', { value: '' }, `${t('wfTagAll')} (${list.length})`),
+              visibleTags.map((tag) => h('option', { key: tag, value: tag }, `${tag} (${tagCounts.get(tag) ?? 0})`)),
+            ),
           )
         : null,
       visibleList.length === 0
@@ -1797,14 +2387,28 @@ function WorkflowsTab({ t }: ComfyUIPanelProps): ReturnType<typeof h> {
             (workflow.tags ?? []).length > 0
               ? h('div', { className: 'dsc-wf-tags' }, (workflow.tags ?? []).map((tag) => h('span', { key: tag, className: 'dsc-tag-chip dsc-tag-chip--mini' }, tag)))
               : null,
+            workflow.skillDir !== undefined
+              ? h('span', { className: 'dsc-badge dsc-badge--ok', title: t('skillBadgeHint') }, workflow.requireSkill === true ? t('skillBadgeRequired') : t('skillBadge'))
+              : null,
           ),
           workflow.description !== '' ? h('div', { className: 'dsc-wf-desc' }, workflow.description) : null,
           h('div', { className: 'dsc-wf-updated' }, `${t('wfUpdated')} ${formatTs(workflow.updatedAt)}`),
           h('div', { className: 'dsc-wf-actions' },
             h('button', { className: 'dsc-btn', disabled: busy, onClick: (event: { stopPropagation: () => void }) => { event.stopPropagation(); void run(workflow.id) } }, t('wfRun')),
             h('button', { className: 'dsc-btn', disabled: busy, onClick: (event: { stopPropagation: () => void }) => { event.stopPropagation(); setEditing({ ...workflow, workflow: JSON.stringify(workflow.workflow, null, 2), parameters: workflow.parameters ?? [], tags: workflow.tags ?? [] }); setError(null) } }, t('wfEdit')),
-            h('button', { className: 'dsc-btn', disabled: busy, onClick: (event: { stopPropagation: () => void }) => { event.stopPropagation(); void remove(workflow.id) } }, t('wfDelete')),
+            h('button', { className: 'dsc-btn', disabled: busy, onClick: (event: { stopPropagation: () => void }) => { event.stopPropagation(); setSkillFor(workflow); setError(null) } }, t('skillButton')),
+            h('button', { className: 'dsc-btn', disabled: busy, onClick: (event: { stopPropagation: () => void }) => { event.stopPropagation(); requestRemove(workflow) } }, t('wfDelete')),
           ),
+          deleting?.id === workflow.id
+            ? h('div', { className: 'dsc-dialog dsc-dialog--danger', onClick: (event: { stopPropagation: () => void }) => event.stopPropagation() },
+              h('div', { className: 'dsc-dialog-head dsc-danger-text' }, t('skillDeleteWithWorkflow')),
+              h('div', { className: 'dsc-row' },
+                h('button', { className: 'dsc-btn dsc-btn--danger', disabled: busy, onClick: () => { setDeleting(null); void remove(workflow.id, true) } }, t('skillDeleteBoth')),
+                h('button', { className: 'dsc-btn', disabled: busy, onClick: () => { setDeleting(null); void remove(workflow.id, false) } }, t('skillKeepPack')),
+                h('button', { className: 'dsc-btn', onClick: () => setDeleting(null) }, t('cancel')),
+              ),
+            )
+            : null,
         ))),
     ),
   )

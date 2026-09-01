@@ -24,6 +24,10 @@ export interface StoredWorkflow {
   parameters?: WorkflowParameter[]
   /** Classification tags (preset kinds like 图生图 plus user-defined). */
   tags?: string[]
+  /** Skill-pack directory name under `<dataDir>/skills/`; absent = no pack. */
+  skillDir?: string
+  /** Refuse `action: run` until the agent has read this workflow's skill pack. */
+  requireSkill?: boolean
   /** Where the workflow came from: 'user' (panel/tool) or 'comfyui' (imported). */
   source?: 'user' | 'comfyui'
   /** Original ComfyUI-side user-data file name when imported from the server. */
@@ -110,8 +114,11 @@ export class ComfyUIStore {
   private readonly mediaSizesPath: string
   private readonly mediaHashesPath: string
   private readonly currentImagePath: string
+  /** Root of the per-workflow skill packs (one directory per pack). */
+  readonly skillsRoot: string
 
   constructor(dir: string, private readonly maxAssets: number) {
+    this.skillsRoot = join(dir, 'skills')
     this.workflowsPath = join(dir, 'workflows.json')
     this.assetsPath = join(dir, 'assets.json')
     this.trackedPath = join(dir, 'tracked.json')
@@ -236,6 +243,10 @@ export class ComfyUIStore {
         ...list[index]!, name, description, workflow,
         parameters,
         tags: tags !== undefined ? tags : list[index]!.tags,
+        // Skill-pack fields are owned by the skill routes, not the workflow
+        // editor: a plain save must never drop a pack the user attached.
+        skillDir: list[index]!.skillDir,
+        requireSkill: list[index]!.requireSkill,
         source: input.source ?? list[index]!.source,
         comfyuiFile: input.comfyuiFile ?? list[index]!.comfyuiFile,
         updatedAt: now,
@@ -255,6 +266,32 @@ export class ComfyUIStore {
     list.push(created)
     await this.writeWorkflows(list)
     return { ok: true, workflow: created }
+  }
+
+  /** Patch the skill-pack fields of one workflow without touching its JSON or
+   * parameters. `skillDir: null` detaches the pack (the directory stays on
+   * disk until an explicit destroy). */
+  async updateWorkflowSkill(id: string, patch: { skillDir?: string | null; requireSkill?: boolean }): Promise<StoredWorkflow | undefined> {
+    const list = await this.listWorkflows()
+    const index = list.findIndex((entry) => entry.id === id)
+    if (index === -1) return undefined
+    const current = list[index]!
+    const next: StoredWorkflow = { ...current, updatedAt: new Date().toISOString() }
+    if (patch.skillDir !== undefined) {
+      if (patch.skillDir === null) {
+        delete next.skillDir
+        delete next.requireSkill
+      } else {
+        next.skillDir = patch.skillDir
+      }
+    }
+    if (patch.requireSkill !== undefined) {
+      if (patch.requireSkill) next.requireSkill = true
+      else delete next.requireSkill
+    }
+    list[index] = next
+    await this.writeWorkflows(list)
+    return next
   }
 
   /** Delete a workflow by id; false when it did not exist. */

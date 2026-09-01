@@ -21,6 +21,9 @@ interface ConfigView {
   maxMediaItems: number
   mediaHost: string
   comfyuiDirs: string[]
+  skillsDir: string
+  /** The path packs actually use, including the `<dataDir>/skills` default. */
+  skillsRoot: string
   writable: boolean
 }
 
@@ -36,6 +39,7 @@ export function ComfyUISettings({ t }: ComfyUISettingsProps): ReturnType<typeof 
   const [apiKeyEnv, setApiKeyEnv] = useState('')
   const [mediaHost, setMediaHost] = useState('')
   const [comfyuiDirs, setComfyuiDirs] = useState<string[]>([])
+  const [skillsDir, setSkillsDir] = useState('')
   const [loadError, setLoadError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [saveState, setSaveState] = useState<'idle' | 'saved' | 'failed'>('idle')
@@ -52,6 +56,7 @@ export function ComfyUISettings({ t }: ComfyUISettingsProps): ReturnType<typeof 
       setApiKeyEnv(view.apiKeyEnv)
       setMediaHost(view.mediaHost ?? '')
       setComfyuiDirs(Array.isArray(view.comfyuiDirs) ? view.comfyuiDirs : [])
+      setSkillsDir(view.skillsDir ?? '')
     }).catch((error: unknown) => {
       if (cancelled) return
       setLoadError(error instanceof Error ? error.message : String(error))
@@ -67,13 +72,14 @@ export function ComfyUISettings({ t }: ComfyUISettingsProps): ReturnType<typeof 
     try {
       // Trim blanks and drop empty rows before persisting.
       const dirs = comfyuiDirs.map((dir) => dir.trim()).filter((dir) => dir !== '')
-      const payload = (await postJson('/comfyui/config', { patch: { baseUrl, apiKeyEnv, mediaHost, comfyuiDirs: dirs } })) as { config?: ConfigView }
+      const payload = (await postJson('/comfyui/config', { patch: { baseUrl, apiKeyEnv, mediaHost, comfyuiDirs: dirs, skillsDir: skillsDir.trim() } })) as { config?: ConfigView }
       if (payload.config !== undefined) {
         setConfig(payload.config)
         setBaseUrl(payload.config.baseUrl)
         setApiKeyEnv(payload.config.apiKeyEnv)
         setMediaHost(payload.config.mediaHost ?? '')
         setComfyuiDirs(payload.config.comfyuiDirs ?? [])
+        setSkillsDir(payload.config.skillsDir ?? '')
       }
       setSaveState('saved')
     } catch (error) {
@@ -195,6 +201,16 @@ export function ComfyUISettings({ t }: ComfyUISettingsProps): ReturnType<typeof 
         },
       }, t('comfyuiDirAdd')),
       h('div', { className: 'dsc-hint' }, t('comfyuiDirsHint')),
+    ),
+    h('div', { className: 'dsc-field' },
+      h('label', null, t('skillsDir')),
+      h('input', {
+        className: 'dsc-input',
+        value: skillsDir,
+        placeholder: config.skillsRoot,
+        onChange: (event: { target: { value: string } }) => { setSkillsDir(event.target.value); setSaveState('idle') },
+      }),
+      h('div', { className: 'dsc-hint' }, t('skillsDirHint', { current: config.skillsRoot })),
     ),
     h('div', { className: 'dsc-row' },
       h('button', { className: 'dsc-btn', disabled: saving || !config.writable, onClick: () => void save() }, t('save')),

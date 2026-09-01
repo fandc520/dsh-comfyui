@@ -24,6 +24,12 @@ export const Config = z.object({
   dataDir: z.string().default(''),
   /** Max asset records kept in the asset index. */
   maxAssets: z.number().min(1).max(10_000).default(200),
+  /** Directory holding the per-workflow skill packs. Empty = `<dataDir>/skills`.
+   * Separate from `dataDir` on purpose: packs are documents a user may want on
+   * another drive, in a synced folder, or under version control, while the
+   * JSON state files belong with the rest of the plugin data. Must be absolute;
+   * a relative value is ignored. */
+  skillsDir: z.string().default(''),
   /** External base URL for generated media (e.g. http://192.168.1.5:3080). Empty = auto-detect the browser's request host, then http://127.0.0.1:<webServerPort>. */
   mediaHost: z.string().default(''),
   /** ComfyUI's output directory on this machine, used to delete asset files
@@ -58,6 +64,8 @@ export type Config = {
   dataDir: string
   /** Max asset records kept in the asset index. */
   maxAssets: number
+  /** Directory holding the per-workflow skill packs; empty = `<dataDir>/skills`. */
+  skillsDir: string
   /** External base URL for generated media; empty auto-detects the request host. */
   mediaHost: string
   /** ComfyUI's output directory on this machine; empty infers it from reported file paths. */

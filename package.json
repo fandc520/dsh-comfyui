@@ -1,7 +1,7 @@
 {
   "name": "dsh-comfyui",
-  "version": "0.3.0-beta.5",
-  "description": "Drive ComfyUI from DeepSeek Harness: generate and process images and videos through agent tools, with a workflow/asset/queue panel, in-chat results and a settings page. / 让 DeepSeek Harness 的 Agent 直接驱动 ComfyUI 生成与处理图像、视频，带工作流/资产/队列面板。",
+  "version": "0.3.0-beta.6",
+  "description": "Let the DeepSeek Harness agent smartly drive a local or remote ComfyUI to generate anything, with workflow and asset management panels, per-workflow skill packs, a companion skill and a same-origin media proxy. / 让 DeepSeek Harness 的 Agent 智能驱动本地或远程 ComfyUI 生成任何内容。附带工作流、资产管理面板与技能包管理挂载。配套 skill 与同源媒体代理。",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/fandc520/dsh-comfyui.git"

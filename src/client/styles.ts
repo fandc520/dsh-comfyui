@@ -139,6 +139,35 @@ select.dsc-input option { background: var(--dsw-alias-bg-layer-1); color: var(--
 .dsc-derived-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
 .dsc-derived-name { color: var(--dsw-alias-label-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsc-dialog { border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; padding: 10px; }
+/* --- skill pack editor: file list beside a plain-text editor --- */
+.dsc-skill { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; margin-top: 8px; }
+.dsc-skill-files { flex: 0 0 190px; min-width: 160px; display: flex; flex-direction: column; gap: 6px; }
+.dsc-skill-main { flex: 1 1 300px; min-width: 260px; display: flex; flex-direction: column; gap: 6px; }
+.dsc-skill-bucket { display: flex; flex-direction: column; gap: 2px; }
+.dsc-skill-bucket-name { font-size: 11px; color: var(--dsw-alias-label-secondary); margin-top: 4px; }
+.dsc-skill-file {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  border: 1px solid transparent; border-radius: 6px; background: transparent;
+  color: inherit; font-size: 12px; padding: 4px 6px; cursor: pointer; text-align: left;
+}
+.dsc-skill-file:hover { background: var(--dsw-alias-bg-layer-2); }
+.dsc-skill-file--active { border-color: var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-2); }
+.dsc-skill-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsc-skill-file-size { color: var(--dsw-alias-label-secondary); font-size: 11px; flex: none; }
+.dsc-skill-create { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.dsc-skill-editor-head { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; }
+.dsc-skill-path { color: var(--dsw-alias-label-primary); }
+.dsc-textarea--skill { min-height: 260px; font-size: 12px; line-height: 1.5; }
+.dsc-skill-preview { border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 6px; align-items: center; }
+.dsc-skill-preview img { max-width: 100%; max-height: 320px; object-fit: contain; border-radius: 6px; }
+.dsc-skill-dir { font-size: 11px; color: var(--dsw-alias-label-secondary); margin: 4px 0; word-break: break-all; }
+.dsc-skill-flags { margin-top: 6px; }
+.dsc-skill-footer { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.dsc-skill-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.dsc-skill-drop-hint { font-size: 11px; color: var(--dsw-alias-label-secondary); border: 1px dashed var(--dsw-alias-border-l1); border-radius: 6px; padding: 4px 6px; text-align: center; }
+.dsc-dialog--danger { border-color: var(--dsw-alias-state-error-primary); }
+.dsc-danger-text { color: var(--dsw-alias-state-error-primary); font-weight: 600; font-size: 12px; line-height: 1.5; }
+.dsc-check { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .dsc-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
 .dsc-extract-modes { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
 .dsc-mode { display: flex; flex-direction: column; gap: 2px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; padding: 8px 10px; cursor: pointer; }
@@ -267,7 +296,7 @@ video.dsc-picker-player { max-height: 180px; }
 .dsc-picker-name { font-size: 13px; line-height: 1.5; padding: 2px 0; color: var(--dsw-alias-label-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsc-picker-card:hover .dsc-picker-name { color: var(--dsw-alias-brand-primary); }
 /* --- workflow tags: filter bar, chips, editor --- */
-.dsc-tag-filter { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 0 2px; }
+.dsc-tag-filter { display: flex; justify-content: flex-end; padding: 6px 0 2px; }
 .dsc-tag-chip { border: 1px solid var(--dsw-alias-border-l1); border-radius: 999px; padding: 2px 10px; font-size: 12px; cursor: pointer; background: transparent; color: var(--dsw-alias-label-primary); }
 .dsc-tag-chip--active { background: var(--dsw-alias-brand-primary); border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-bg-layer-1); }
 .dsc-tag-chip--mini { font-size: 11px; padding: 1px 8px; cursor: default; border: 1px solid var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); background: color-mix(in srgb, var(--dsw-alias-brand-primary) 10%, transparent); }
@@ -284,6 +313,7 @@ video.dsc-picker-player { max-height: 180px; }
 .dsc-queue-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .dsc-btn { border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; padding: 2px 8px; font-size: 12px; cursor: pointer; background: transparent; color: var(--dsw-alias-label-primary); }
 .dsc-btn--sm { padding: 1px 6px; font-size: 11px; }
+.dsc-input--sm { padding: 3px 6px; font-size: 12px; }
 .dsc-btn:disabled { opacity: 0.5; cursor: default; }
 .dsc-job-item { display: flex; align-items: center; gap: 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; padding: 7px 10px; background: var(--dsw-alias-bg-layer-1); transition: background 0.12s, border-color 0.12s; }
 .dsc-job-item:hover { background: var(--dsw-alias-bg-layer-2); border-color: var(--dsw-alias-border-l2); }

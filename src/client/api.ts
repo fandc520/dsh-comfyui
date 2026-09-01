@@ -17,3 +17,17 @@ export async function postJson(url: string, body: unknown): Promise<unknown> {
   }
   return response.json() as Promise<unknown>
 }
+
+/** POST raw bytes (an imported file) and read the JSON reply. */
+export async function postRaw(url: string, bytes: ArrayBuffer): Promise<unknown> {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/octet-stream' },
+    body: bytes,
+  })
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { error?: string }
+    throw new Error(payload.error ?? `HTTP ${response.status}`)
+  }
+  return response.json() as Promise<unknown>
+}

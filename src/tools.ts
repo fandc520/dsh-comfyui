@@ -15,6 +15,7 @@ import type { RunProgress } from './progress.js'
 import type { QueuedRun } from './queue.js'
 import { refreshParameterMetadata, type Workflow, type WorkflowParameter } from './params.js'
 import type { HostHint } from './host-hint.js'
+import { SKILL_MAIN, joinFrontmatter, type WorkflowSkillPacks } from './skillpack.js'
 
 /** A workflow saved on the ComfyUI server (userdata/workflows), with extract status. */
 export interface ComfyUIComfyWorkflow {
@@ -71,6 +72,8 @@ export interface ComfyUIRuntime {
   }): Promise<{ ok: true; workflow: StoredWorkflow } | { ok: false; error: string }>
   /** Delete a workflow from the library; false when it did not exist. */
   deleteWorkflow(id: string): Promise<boolean>
+  /** Per-workflow skill packs (SKILL.md bundles under `<dataDir>/skills/`). */
+  skillPacks: WorkflowSkillPacks
   /** Force TTS-Audio-Suite to rescan its voice library (best-effort; false
    * when the server has no such endpoint). Call before re-deriving parameter
    * snapshots so object_info reports newly added voices. */
@@ -111,6 +114,33 @@ export interface ComfyUIRuntime {
 interface ToolRunContext {
   agent?: unknown
   signal: AbortSignal
+}
+
+/**
+ * Which skill packs each agent has already read, for the `requireSkill` gate.
+ *
+ * Keyed by the live `Agent` handle the tools registry passes as `exec.agent`:
+ * one per session and stable across turns, so a WeakMap entry lives exactly as
+ * long as the session and needs no eviction pass. An execution without an
+ * agent (a direct internal call) is never gated.
+ */
+const skillPackReads = new WeakMap<object, Set<string>>()
+
+/** Upper bound on the text one `comfyui_skill action: read` returns. The pack
+ * caps files at 256 KB, which is still far more than a tool result should
+ * inject in one go; a longer file comes back truncated with a marker. */
+const MAX_TOOL_READ_CHARS = 40_000
+
+function markSkillPackRead(agent: unknown, workflowId: string): void {
+  if (typeof agent !== 'object' || agent === null) return
+  const seen = skillPackReads.get(agent)
+  if (seen === undefined) skillPackReads.set(agent, new Set([workflowId]))
+  else seen.add(workflowId)
+}
+
+function hasReadSkillPack(agent: unknown, workflowId: string): boolean {
+  if (typeof agent !== 'object' || agent === null) return true
+  return skillPackReads.get(agent)?.has(workflowId) === true
 }
 
 /** One media item returned by comfyui_run (JSON-safe). */
@@ -510,7 +540,7 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
         const data = value as {
           action: string
           env?: { baseUrl: string; comfyuiDirs: string[] }
-          workflows?: Array<{ id: string; name: string; description: string; parameters?: Array<{ name: string; label: string; type: string; default?: string | number | boolean; random?: boolean; numberKind?: 'int' | 'float'; options?: Array<string | number>; upload?: 'image' | 'video' | 'audio' | 'media'; subfolder?: string }> }>
+          workflows?: Array<{ id: string; name: string; description: string; skill?: { summary: string; files: number; required: boolean }; parameters?: Array<{ name: string; label: string; type: string; default?: string | number | boolean; random?: boolean; numberKind?: 'int' | 'float'; options?: Array<string | number>; upload?: 'image' | 'video' | 'audio' | 'media'; subfolder?: string }> }>
           comfyuiWorkflows?: Array<{ name: string; extracted: boolean; derived: Array<{ libraryId: string; name: string }> }>
           loadArea?: { slots: number; loaded: number; items: Array<{ name: string; kind: string; source: string }> }
           result?: RunResult
@@ -520,6 +550,32 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
           background?: BackgroundResult
           changed?: string[]
           parameterCount?: number
+          skill?: { workflowName: string; summary: string; body: string; resourceBase: string; files: string[] }
+        }
+        if (data.action === 'skill') {
+          const pack = data.skill
+          if (pack === undefined) return [{ type: 'text', text: `ComfyUI workflow ${data.name ?? data.id} 没有技能包。` }]
+          // Same framing the host uses for its own skills: a named block, the
+          // resource base, then the body verbatim. The reference files stay on
+          // disk until the body sends the model after one of them.
+          const others = pack.files.filter((file) => file !== 'SKILL.md')
+          return [{
+            type: 'text',
+            text: [
+              `<skill_content name="${pack.workflowName}">`,
+              '<skill_resources>',
+              `Base directory for this skill: ${pack.resourceBase}`,
+              others.length > 0
+                ? `Files in this pack: ${others.join(', ')} — resolve them against the base directory and read one only when the instructions below point at it.`
+                : 'This pack has no reference files.',
+              '</skill_resources>',
+              '',
+              '<skill_instructions>',
+              pack.body,
+              '</skill_instructions>',
+              '</skill_content>',
+            ].join('\n'),
+          }]
         }
         if (data.action === 'get') {
           return [{ type: 'text', text: `ComfyUI workflow ${data.name ?? data.id}: ${JSON.stringify(data.workflow)}` }]
@@ -546,6 +602,11 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
           lines.push(`Saved ComfyUI workflows (${data.workflows?.length ?? 0}):`)
           for (const workflow of data.workflows ?? []) {
             lines.push(`- ${workflow.id} — ${workflow.name}${workflow.description !== '' ? `: ${workflow.description}` : ''}`)
+            const skill = workflow.skill
+            if (skill !== undefined) {
+              const extra = skill.files > 1 ? `，另有 ${skill.files - 1} 篇参考文档` : ''
+              lines.push(`  技能包${skill.required ? '（运行前必读）' : ''}: ${skill.summary}${extra} — 运行前先 action: skill { id: "${workflow.id}" }`)
+            }
             for (const param of workflow.parameters ?? []) {
               const def = typeof param.default === 'string' ? `"${param.default}"` : String(param.default)
               const options = Array.isArray(param.options) && param.options.length > 0 ? `，可选: ${param.options.join(' / ')}` : ''
@@ -588,8 +649,8 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
     timeoutMs: TOOL_TIMEOUT_MS,
     async execute(args, exec) {
       const action = args.action
-      if (action !== 'list' && action !== 'run' && action !== 'get' && action !== 'refresh') {
-        throw new Error(`comfyui_workflow: action must be list, run, get, or refresh, got ${String(action)}`)
+      if (action !== 'list' && action !== 'run' && action !== 'get' && action !== 'refresh' && action !== 'skill') {
+        throw new Error(`comfyui_workflow: action must be list, run, skill, get, or refresh, got ${String(action)}`)
       }
       if (action === 'list') {
         const [workflows, comfyui, slots] = await Promise.all([
@@ -601,6 +662,22 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
         // loader parameters take these files in slot order, so the model can
         // see how many references a run will pick up without asking.
         const loaded = slots.filter((slot): slot is NonNullable<LoadSlot> => slot !== null)
+        // Rung one of the skill-pack disclosure ladder: a workflow that has a
+        // pack contributes ONE summary line here, not its body. The model
+        // reaches for `action: skill` only after this listing points it at a
+        // specific workflow, so an unused pack costs nothing.
+        const packs = new Map<string, { summary: string; files: number; required: boolean }>()
+        await Promise.all(workflows
+          .filter((workflow) => workflow.skillDir !== undefined && workflow.skillDir !== '')
+          .map(async (workflow) => {
+            const pack = await runtime.skillPacks.infoFor(workflow).catch(() => undefined)
+            if (pack === undefined) return
+            packs.set(workflow.id, {
+              summary: pack.summary !== '' ? pack.summary : `${workflow.name} 的使用说明`,
+              files: pack.files.length,
+              required: pack.required,
+            })
+          }))
         return {
           action: 'list',
           // Local environment the model can rely on: the ComfyUI server
@@ -620,6 +697,7 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
             id,
             name,
             description,
+            ...(packs.has(id) ? { skill: packs.get(id)! } : {}),
             parameters: (parameters ?? []).map(({ name: pname, label, type, default: def, random, numberKind, options, upload }) => {
               // DSH validates tool output as lossless JSON: JSON.stringify drops
               // undefined keys, so omit optional fields instead of passing undefined.
@@ -639,7 +717,7 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
       }
       const id = args.id
       if (typeof id !== 'string' || id === '') {
-        throw new Error('comfyui_workflow: id is required for action: run, get and refresh')
+        throw new Error('comfyui_workflow: id is required for action: run, get, refresh and skill')
       }
       const saved = await runtime.getWorkflow(id)
       if (saved === undefined) {
@@ -653,6 +731,26 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
           description: saved.description,
           parameters: saved.parameters ?? [],
           workflow: saved.workflow,
+        }
+      }
+      if (action === 'skill') {
+        const pack = await runtime.skillPacks.load(saved.id)
+        if (!pack.ok) {
+          throw new Error(`comfyui_workflow: ${pack.error}`)
+        }
+        // Reading the pack is what opens the `requireSkill` gate below.
+        markSkillPackRead(exec.agent, saved.id)
+        return {
+          action: 'skill',
+          id: saved.id,
+          name: saved.name,
+          skill: {
+            workflowName: pack.value.workflowName,
+            summary: pack.value.summary,
+            body: pack.value.body,
+            resourceBase: pack.value.resourceBase,
+            files: pack.value.files,
+          },
         }
       }
       if (action === 'refresh') {
@@ -688,6 +786,12 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
           parameterCount: parameters.length,
           changed,
         }
+      }
+      // The 必读 gate: workflows the user marked `requireSkill` refuse to run
+      // until this session has actually loaded their pack. The reminder in the
+      // listing is advisory; this is the part that holds.
+      if (saved.requireSkill === true && saved.skillDir !== undefined && !hasReadSkillPack(exec.agent, saved.id)) {
+        throw new Error(`comfyui_workflow: 工作流 "${saved.name}" 标记了运行前必读技能包 — 先调用 action: skill { id: "${saved.id}" } 读完再运行。`)
       }
       const config = runtime.getConfig()
       const client = runtime.createClient(await runtime.getApiKey())
@@ -755,6 +859,184 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
   }
 }
 
+/**
+ * `comfyui_skill`: read and write one workflow's skill pack.
+ *
+ * The pack is documentation the agent is expected to consult before running a
+ * workflow (`comfyui_workflow action: skill`), and this tool is the other half:
+ * the agent can also author it — record a pitfall it just hit, add a style
+ * reference, lay out its own folders — with the same validation, size caps, and
+ * path containment the panel goes through.
+ *
+ * Destroying a pack is deliberately absent. The files are hand-written by the
+ * user and have no other copy, so removing the whole thing stays a panel
+ * gesture behind an explicit confirmation; the agent can delete a file it owns
+ * but cannot wipe the directory.
+ */
+function skillDefinition(runtime: ComfyUIRuntime): ToolDefinition {
+  return {
+    name: 'comfyui_skill',
+    description: [
+      "Read and write one workflow's skill pack: the SKILL.md the agent reads before running that workflow, plus its reference files, scripts, templates and assets.",
+      '`action: list` returns the pack listing (files, sub-directories, byte sizes) and its absolute directory.',
+      '`action: read` returns one file (path relative to the pack, e.g. `references/styles.md`); reading `SKILL.md` also satisfies the 必读 gate that blocks `comfyui_workflow action: run` for workflows marked required.',
+      '`action: write` creates or overwrites one file (`content`); pass `summary` alongside when writing SKILL.md to set the one-line summary the workflow listing shows. `action: append` adds to the end of an existing file instead — the right choice for recording a newly discovered pitfall without rewriting the document.',
+      '`action: mkdir` creates a sub-directory, `action: rename` moves a file within the pack, `action: delete` removes one file (SKILL.md cannot be renamed or deleted).',
+      '`action: enable` attaches a pack to a workflow that has none (seeding SKILL.md), and `action: require` toggles whether running that workflow demands the pack be read first.',
+      'Write documentation the next agent run will need: when to use the workflow, which parameter values matter, what fails. Keep SKILL.md short and put bulk material in separate files — SKILL.md is loaded whole, the other files only when it points at them.',
+    ].join(' '),
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['list', 'read', 'write', 'append', 'mkdir', 'rename', 'delete', 'enable', 'require'],
+          description: 'list the pack; read/write/append/rename/delete one file; mkdir a sub-directory; enable a pack on a workflow; require toggles the read-before-run gate.',
+        },
+        workflow_id: { type: 'string', description: 'Workflow id from comfyui_workflow action: list.' },
+        path: { type: 'string', description: 'Pack-relative file path for read/write/append/rename/delete, e.g. "SKILL.md" or "references/styles.md". One level of sub-directory only.' },
+        content: { type: 'string', description: 'File text for write and append.' },
+        summary: { type: 'string', description: 'One-line summary stored in SKILL.md frontmatter; this is the line the workflow listing shows, so make it say when to use the workflow.' },
+        to: { type: 'string', description: 'New path for rename (a bare name keeps the current directory).' },
+        name: { type: 'string', description: 'Sub-directory name for mkdir (letters, digits, CJK, underscore, dash).' },
+        required: { type: 'boolean', description: 'For action: require — true refuses to run the workflow until the pack has been read in this session.' },
+      },
+      required: ['action', 'workflow_id'],
+    },
+    output: {
+      schema: { type: 'object' },
+      render(_args, value) {
+        const data = value as {
+          action: string
+          workflowName?: string
+          path?: string
+          content?: string
+          truncated?: boolean
+          dir?: string
+          summary?: string
+          files?: Array<{ path: string; size: number }>
+          dirs?: string[]
+          required?: boolean
+        }
+        if (data.action === 'read') {
+          return [{ type: 'text', text: `${data.path} (${data.workflowName}):\n${data.content ?? ''}${data.truncated === true ? '\n…（文件过大，已截断）' : ''}` }]
+        }
+        const lines: string[] = []
+        if (data.action === 'list') {
+          lines.push(`技能包 ${data.workflowName}（${data.dir}）${data.required === true ? ' — 运行前必读' : ''}`)
+          if (data.summary !== undefined && data.summary !== '') lines.push(`摘要: ${data.summary}`)
+          for (const file of data.files ?? []) lines.push(`  ${file.path} (${file.size} B)`)
+          const empty = (data.dirs ?? []).filter((dir) => !(data.files ?? []).some((file) => file.path.startsWith(`${dir}/`)))
+          if (empty.length > 0) lines.push(`  空目录: ${empty.map((dir) => `${dir}/`).join('、')}`)
+          return [{ type: 'text', text: lines.join('\n') }]
+        }
+        lines.push(`技能包 ${data.workflowName} 已更新（${data.action}${data.path !== undefined ? ` ${data.path}` : ''}）`)
+        for (const file of data.files ?? []) lines.push(`  ${file.path} (${file.size} B)`)
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+      presentationMeta(_args, value) {
+        return value
+      },
+    },
+    timeoutMs: TOOL_TIMEOUT_MS,
+    async execute(args, exec) {
+      const action = args.action
+      const id = args.workflow_id
+      if (typeof id !== 'string' || id === '') {
+        throw new Error('comfyui_skill: workflow_id is required')
+      }
+      const saved = await runtime.getWorkflow(id)
+      if (saved === undefined) {
+        throw new Error(`comfyui_skill: workflow "${id}" not found — run comfyui_workflow action: list first`)
+      }
+      const path = typeof args.path === 'string' ? args.path : ''
+      const content = typeof args.content === 'string' ? args.content : ''
+
+      const listing = async (label: string, extra?: Record<string, unknown>): Promise<Record<string, unknown>> => {
+        const pack = await runtime.skillPacks.info(id)
+        if (pack === undefined) throw new Error(`comfyui_skill: 工作流 "${saved.name}" 没有技能包 — 先用 action: enable 挂一个`)
+        return {
+          action: label,
+          workflowId: id,
+          workflowName: saved.name,
+          dir: pack.dir,
+          summary: pack.summary,
+          required: pack.required,
+          files: pack.files.map(({ path: file, size }) => ({ path: file, size })),
+          dirs: pack.dirs,
+          ...extra,
+        }
+      }
+
+      if (action === 'enable') {
+        const result = await runtime.skillPacks.enable(id)
+        if (!result.ok) throw new Error(`comfyui_skill: ${result.error}`)
+        return listing('enable')
+      }
+      if (action === 'list') return listing('list')
+      if (action === 'require') {
+        const result = await runtime.skillPacks.setRequired(id, args.required === true)
+        if (!result.ok) throw new Error(`comfyui_skill: ${result.error}`)
+        return listing('require')
+      }
+      if (action === 'read') {
+        if (path === '') throw new Error('comfyui_skill: path is required for action: read')
+        const file = await runtime.skillPacks.readFile(id, path)
+        if (!file.ok) throw new Error(`comfyui_skill: ${file.error}`)
+        // Reading the main document is the same gesture `comfyui_workflow
+        // action: skill` performs, so it opens the run gate too.
+        if (path === SKILL_MAIN) markSkillPackRead(exec.agent, id)
+        const truncated = file.value.length > MAX_TOOL_READ_CHARS
+        return {
+          action: 'read',
+          workflowId: id,
+          workflowName: saved.name,
+          path,
+          content: truncated ? file.value.slice(0, MAX_TOOL_READ_CHARS) : file.value,
+          truncated,
+        }
+      }
+      if (action === 'write' || action === 'append') {
+        if (path === '') throw new Error(`comfyui_skill: path is required for action: ${action}`)
+        let text = content
+        if (action === 'append') {
+          const existing = await runtime.skillPacks.readFile(id, path)
+          const before = existing.ok ? existing.value : ''
+          text = before === '' ? content : `${before.replace(/\s*$/, '')}\n\n${content}`
+        }
+        const summary = typeof args.summary === 'string' ? args.summary : undefined
+        const result = path === SKILL_MAIN && summary !== undefined
+          ? await runtime.skillPacks.writeFile(id, path, joinFrontmatter(summary, text))
+          : await runtime.skillPacks.writeFile(id, path, text)
+        if (!result.ok) throw new Error(`comfyui_skill: ${result.error}`)
+        return listing(action, { path })
+      }
+      if (action === 'mkdir') {
+        const name = typeof args.name === 'string' ? args.name : ''
+        const result = await runtime.skillPacks.makeDir(id, name)
+        if (!result.ok) throw new Error(`comfyui_skill: ${result.error}`)
+        return listing('mkdir', { path: `${name}/` })
+      }
+      if (action === 'rename') {
+        const to = typeof args.to === 'string' ? args.to : ''
+        if (path === '' || to === '') throw new Error('comfyui_skill: path and to are required for action: rename')
+        const bucket = path.includes('/') ? `${path.split('/')[0] ?? ''}/` : ''
+        const target = to.includes('/') ? to : `${bucket}${to}`
+        const result = await runtime.skillPacks.renameFile(id, path, target)
+        if (!result.ok) throw new Error(`comfyui_skill: ${result.error}`)
+        return listing('rename', { path: target })
+      }
+      if (action === 'delete') {
+        if (path === '') throw new Error('comfyui_skill: path is required for action: delete')
+        const result = await runtime.skillPacks.deleteFile(id, path)
+        if (!result.ok) throw new Error(`comfyui_skill: ${result.error}`)
+        return listing('delete', { path })
+      }
+      throw new Error(`comfyui_skill: unknown action ${String(action)}`)
+    },
+  }
+}
+
 /** Register the plugin tools; returns disposers. */
 export function registerComfyUITools(ctx: Context, runtime: ComfyUIRuntime): Array<() => void> {
   const tools = (ctx as unknown as { tools: { register(definition: ToolDefinition): () => void } }).tools
@@ -762,5 +1044,6 @@ export function registerComfyUITools(ctx: Context, runtime: ComfyUIRuntime): Arr
   disposers.push(tools.register(runDefinition(runtime, ctx)))
   disposers.push(tools.register(objectInfoDefinition(runtime)))
   disposers.push(tools.register(workflowDefinition(runtime, ctx)))
+  disposers.push(tools.register(skillDefinition(runtime)))
   return disposers
 }

@@ -6,7 +6,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { Config, type Config as ConfigType } from './config.js'
 import { ComfyUIClient, CLIENT_ID } from './comfyui.js'
@@ -18,6 +18,7 @@ import { ProgressTracker } from './progress.js'
 import { COMFYUI_SKILL } from './skill.js'
 import type { StoredWorkflow } from './store.js'
 import { analyzeWorkflowParameters, applyWorkflowParameters, type Workflow } from './params.js'
+import { createWorkflowSkillPacks } from './skillpack.js'
 import { registerComfyUITools, type ComfyUIRuntime } from './tools.js'
 import { mountComfyUIRoutes } from './routes.js'
 import { mountComfyUIProxy } from './proxy.js'
@@ -99,6 +100,7 @@ export async function apply(ctx: Context, entryConfig: Partial<ConfigType>): Pro
     maxMediaBytes: entryConfig.maxMediaBytes ?? 64 * 1024 * 1024,
     dataDir: entryConfig.dataDir !== undefined && entryConfig.dataDir !== '' ? entryConfig.dataDir : defaultDataDir(),
     maxAssets: entryConfig.maxAssets ?? 200,
+    skillsDir: entryConfig.skillsDir ?? '',
     mediaHost: entryConfig.mediaHost ?? '',
     outputDir: entryConfig.outputDir ?? '',
     comfyuiDirs: Array.isArray(entryConfig.comfyuiDirs)
@@ -108,6 +110,22 @@ export async function apply(ctx: Context, entryConfig: Partial<ConfigType>): Pro
 
   const store = new ComfyUIStore(resolved.dataDir, resolved.maxAssets)
   await store.init()
+  // Per-workflow skill packs default to `<dataDir>/skills`; `skillsDir` moves
+  // them anywhere absolute (another drive, a synced folder, a repo) without
+  // dragging the JSON state along. The root is a getter, not a snapshot, so a
+  // settings-page change applies to the next call rather than the next restart.
+  // Directories are created lazily when a user attaches a pack, so nothing is
+  // written for a library that never uses them.
+  const skillPacks = createWorkflowSkillPacks({
+    skillsRoot: () => {
+      const configured = resolved.skillsDir.trim()
+      // A relative path would resolve against the process cwd, which is not
+      // something a user typing into the settings page can predict.
+      return configured !== '' && isAbsolute(configured) ? configured : store.skillsRoot
+    },
+    getWorkflow: (id) => store.getWorkflow(id),
+    updateWorkflowSkill: (id, patch) => store.updateWorkflowSkill(id, patch),
+  })
   const tracker = new QueueTracker({
     load: () => store.loadTracked(),
     save: (state) => store.saveTracked(state),
@@ -204,6 +222,7 @@ export async function apply(ctx: Context, entryConfig: Partial<ConfigType>): Pro
       return client.getOk('/api/tts-audio-suite/voice-library?refresh=1', 20_000)
     },
     deleteWorkflow: (id) => store.deleteWorkflow(id),
+    skillPacks,
     listMediaSizes: () => store.loadMediaSizes(),
     saveMediaSize: (name, size) => store.saveMediaSize(name, size),
     lookupMediaHash: (hash) => store.lookupMediaHash(hash),

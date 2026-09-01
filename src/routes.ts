@@ -11,7 +11,9 @@ import type { ComfyUIRuntime } from './tools.js'
 import { analyzeWorkflowParameters, comboChildInfo, inputOptions, numberSpecOf, refreshParameterMetadata, uploadKindOf, type Workflow } from './params.js'
 import { collectMedia, historyErrorMessage, mediaProxyUrl, type ComfyUIMediaRef } from './comfyui.js'
 import type { AssetRecord } from './store.js'
+import { MAX_ASSET_BYTES, SKILL_MAIN, SKILL_PRESET_DIRS, joinFrontmatter, splitFrontmatter } from './skillpack.js'
 import { unlink } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 /** One selectable item in the load-area picker. */
@@ -149,6 +151,10 @@ function redact(runtime: ComfyUIRuntime, apiKey: string | undefined): Record<str
     maxMediaItems: config.maxMediaItems,
     mediaHost: config.mediaHost,
     comfyuiDirs: config.comfyuiDirs,
+    skillsDir: config.skillsDir,
+    // The path actually in use, so the page can show where packs land even
+    // when skillsDir is empty (the `<dataDir>/skills` default).
+    skillsRoot: runtime.skillPacks.root,
     writable: runtime.settingsWritable(),
   }
 }
@@ -685,6 +691,250 @@ export function mountComfyUIRoutes(ctx: Context, runtime: ComfyUIRuntime): (() =
     }),
   }))
 
+  // The skill-pack editor's whole surface: one GET for the listing (plus a
+  // single file's text when `path` is given) and one action-style POST for
+  // every mutation. Paths from the browser are untrusted and re-validated
+  // inside the pack store, which is also where the containment check lives.
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/comfyui/workflows/skill',
+    handler: withHint(async (request, response) => {
+      if (methodIs(request, 'GET')) {
+        const url = new URL(request.url ?? '/', 'http://localhost')
+        const id = url.searchParams.get('id') ?? ''
+        if (id === '') {
+          sendJson(response, 400, { error: 'id is required' })
+          return
+        }
+        const workflow = await runtime.getWorkflow(id)
+        if (workflow === undefined) {
+          sendJson(response, 404, { error: `workflow "${id}" not found` })
+          return
+        }
+        const path = url.searchParams.get('path')
+        if (path !== null && path !== '') {
+          const file = await runtime.skillPacks.readFile(id, path)
+          if (!file.ok) {
+            sendJson(response, 200, { ok: false, error: file.error })
+            return
+          }
+          // SKILL.md's frontmatter stays a host-side concern: the panel edits a
+          // summary field and a body, never the raw `---` block.
+          if (path === SKILL_MAIN) {
+            const split = splitFrontmatter(file.value)
+            sendJson(response, 200, { ok: true, path, content: file.value, summary: split.summary, body: split.body })
+            return
+          }
+          sendJson(response, 200, { ok: true, path, content: file.value })
+          return
+        }
+        const pack = await runtime.skillPacks.info(id)
+        sendJson(response, 200, {
+          ok: true,
+          enabled: pack !== undefined,
+          root: runtime.skillPacks.root,
+          // Suggested directory names, defined once on the host so the panel
+          // dropdown and the agent-facing tool offer the same list.
+          presetDirs: SKILL_PRESET_DIRS,
+          pack: pack ?? null,
+        })
+        return
+      }
+      if (!methodIs(request, 'POST')) {
+        sendJson(response, 405, { error: 'method not allowed' })
+        return
+      }
+      const body = await readSameOriginPost(request, response)
+      if (body === undefined) return
+      const id = typeof body.id === 'string' ? body.id : ''
+      if (id === '') {
+        sendJson(response, 400, { error: 'id is required' })
+        return
+      }
+      const action = typeof body.action === 'string' ? body.action : ''
+      const path = typeof body.path === 'string' ? body.path : ''
+      const content = typeof body.content === 'string' ? body.content : ''
+      try {
+        switch (action) {
+          case 'enable': {
+            const result = await runtime.skillPacks.enable(id)
+            sendJson(response, 200, result.ok ? { ok: true, enabled: true, pack: result.value } : { ok: false, error: result.error })
+            return
+          }
+          case 'disable': {
+            const result = await runtime.skillPacks.disable(id)
+            sendJson(response, 200, result.ok ? { ok: true, enabled: false, pack: null } : { ok: false, error: result.error })
+            return
+          }
+          case 'destroy': {
+            const result = await runtime.skillPacks.destroy(id)
+            sendJson(response, 200, result.ok ? { ok: true, enabled: false, pack: null } : { ok: false, error: result.error })
+            return
+          }
+          case 'require': {
+            const result = await runtime.skillPacks.setRequired(id, body.required === true)
+            sendJson(response, 200, result.ok ? { ok: true, enabled: true, pack: result.value } : { ok: false, error: result.error })
+            return
+          }
+          case 'mkdir': {
+            const name = typeof body.name === 'string' ? body.name : ''
+            const result = await runtime.skillPacks.makeDir(id, name)
+            sendJson(response, 200, result.ok ? { ok: true, enabled: true, pack: result.value } : { ok: false, error: result.error })
+            return
+          }
+          case 'write': {
+            const text = path === SKILL_MAIN && typeof body.summary === 'string'
+              ? joinFrontmatter(body.summary, content)
+              : content
+            const result = await runtime.skillPacks.writeFile(id, path, text)
+            sendJson(response, 200, result.ok ? { ok: true, enabled: true, pack: result.value } : { ok: false, error: result.error })
+            return
+          }
+          case 'rename': {
+            const to = typeof body.to === 'string' ? body.to : ''
+            const result = await runtime.skillPacks.renameFile(id, path, to)
+            sendJson(response, 200, result.ok ? { ok: true, enabled: true, pack: result.value } : { ok: false, error: result.error })
+            return
+          }
+          case 'delete': {
+            const result = await runtime.skillPacks.deleteFile(id, path)
+            sendJson(response, 200, result.ok ? { ok: true, enabled: true, pack: result.value } : { ok: false, error: result.error })
+            return
+          }
+          default:
+            sendJson(response, 400, { error: `unknown action: ${action}` })
+        }
+      } catch (error) {
+        sendJson(response, 200, { ok: false, error: errorMessage(error) })
+      }
+    }),
+  }))
+
+  // Importing a file into a pack: the raw bytes ride the request body with the
+  // name in the query, so images and scripts arrive byte-exact without a
+  // multipart parser. The destination bucket comes from the extension unless
+  // the panel names one; the caps live in the pack store, not here.
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/comfyui/workflows/skill/import',
+    handler: withHint(async (request, response) => {
+      if (!methodIs(request, 'POST')) {
+        sendJson(response, 405, { error: 'method not allowed' })
+        return
+      }
+      if (!sameOrigin(request)) {
+        sendJson(response, 403, { error: 'forbidden: same-origin requests only' })
+        return
+      }
+      const url = new URL(request.url ?? '/', 'http://localhost')
+      const id = url.searchParams.get('id') ?? ''
+      const name = url.searchParams.get('name') ?? ''
+      const bucket = url.searchParams.get('bucket') ?? ''
+      if (id === '' || name === '') {
+        sendJson(response, 400, { error: 'id and name are required' })
+        return
+      }
+      try {
+        const raw = await readRawBody(request)
+        if (raw.length === 0) {
+          sendJson(response, 200, { ok: false, error: '文件为空' })
+          return
+        }
+        // Cheap upper bound before the store's per-bucket check, so an oversized
+        // upload is rejected on the size it actually has.
+        if (raw.length > MAX_ASSET_BYTES) {
+          sendJson(response, 200, { ok: false, error: `单个文件不能超过 ${Math.floor(MAX_ASSET_BYTES / 1024 / 1024)} MB` })
+          return
+        }
+        const result = await runtime.skillPacks.importFile(id, name, raw, bucket)
+        sendJson(response, 200, result.ok
+          ? { ok: true, enabled: true, path: result.value.path, pack: result.value.pack }
+          : { ok: false, error: result.error })
+      } catch (error) {
+        sendJson(response, 200, { ok: false, error: errorMessage(error) })
+      }
+    }),
+  }))
+
+  // Opens the pack directory in the desktop file manager. This is the one
+  // route that launches a local process, so it stays deliberately narrow: the
+  // directory comes from the pack store (never from the request), the opener is
+  // spawned with an argument array rather than a shell string, and the request
+  // must be same-origin. It acts on the machine running DSH, which is not the
+  // user's machine when the panel is open from another host — the panel says so
+  // and shows the path either way.
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/comfyui/workflows/skill/reveal',
+    handler: withHint(async (request, response) => {
+      if (!methodIs(request, 'POST')) {
+        sendJson(response, 405, { error: 'method not allowed' })
+        return
+      }
+      const body = await readSameOriginPost(request, response)
+      if (body === undefined) return
+      const id = typeof body.id === 'string' ? body.id : ''
+      if (id === '') {
+        sendJson(response, 400, { error: 'id is required' })
+        return
+      }
+      const pack = await runtime.skillPacks.info(id)
+      if (pack === undefined) {
+        sendJson(response, 200, { ok: false, error: '该工作流没有技能包' })
+        return
+      }
+      const opener = process.platform === 'win32'
+        ? 'explorer.exe'
+        : process.platform === 'darwin' ? 'open' : 'xdg-open'
+      try {
+        // Detached and unref'd: the file manager outlives this request, and
+        // explorer.exe reports a non-zero exit code even when it succeeded, so
+        // the exit status is deliberately not awaited.
+        const child = spawn(opener, [pack.dir], { detached: true, stdio: 'ignore' })
+        child.on('error', () => {})
+        child.unref()
+        sendJson(response, 200, { ok: true, dir: pack.dir })
+      } catch (error) {
+        sendJson(response, 200, { ok: false, error: errorMessage(error), dir: pack.dir })
+      }
+    }),
+  }))
+
+  // Serves one pack file verbatim so the panel can preview an imported image.
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/comfyui/workflows/skill/raw',
+    handler: withHint(async (request, response) => {
+      if (!methodIs(request, 'GET') && !methodIs(request, 'HEAD')) {
+        sendJson(response, 405, { error: 'method not allowed' })
+        return
+      }
+      const url = new URL(request.url ?? '/', 'http://localhost')
+      const id = url.searchParams.get('id') ?? ''
+      const path = url.searchParams.get('path') ?? ''
+      if (id === '' || path === '') {
+        sendJson(response, 400, { error: 'id and path are required' })
+        return
+      }
+      const file = await runtime.skillPacks.readRaw(id, path)
+      if (!file.ok) {
+        sendJson(response, 404, { error: file.error })
+        return
+      }
+      response.writeHead(200, {
+        'content-type': file.value.contentType,
+        'content-length': String(file.value.bytes.length),
+        'cache-control': 'no-store',
+        // Pack files are user content served from the app origin; never let a
+        // browser sniff one into something executable.
+        'x-content-type-options': 'nosniff',
+        'content-disposition': 'inline',
+      })
+      if (methodIs(request, 'HEAD')) response.end()
+      else response.end(file.value.bytes)
+    }),
+  }))
+
   disposers.push(webServer.register({
     kind: 'exact',
     path: '/comfyui/workflows/delete',
@@ -700,6 +950,11 @@ export function mountComfyUIRoutes(ctx: Context, runtime: ComfyUIRuntime): (() =
         sendJson(response, 400, { error: 'id is required' })
         return
       }
+      // A workflow with a skill pack takes its documentation with it only when
+      // the user says so: the panel asks before deleting, and an unanswered
+      // delete leaves the directory behind rather than silently discarding
+      // hand-written notes.
+      if (body.deleteSkill === true) await runtime.skillPacks.destroy(id).catch(() => undefined)
       await runtime.deleteWorkflow(id)
       sendJson(response, 200, { ok: true })
     }),
