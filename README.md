@@ -16,7 +16,14 @@
   <img src="https://img.shields.io/npm/l/dsh-comfyui" alt="license" />
 </p>
 
-> **要求 DeepSeek Harness ≥ 0.1.2-alpha.4。** 0.4.0 起使用新版 settings 服务 API；老版本 dsh 请留在 0.3.x 线。
+> **版本配对（选对 dsh 版本再装，否则 dshmarket 会报风险提示）**：
+>
+> | dsh-comfyui | 配对的 DeepSeek Harness | 说明 |
+> | --- | --- | --- |
+> | **0.4.0（最新，`latest` tag）** | **≥ 0.1.2** | 0.4.0 起使用新版 settings 服务 API |
+> | **0.3.x（beta 线，`beta` tag）** | **0.1.1** | 老版本 dsh 请留在 0.3.x 线 |
+>
+> 安装：`dsh plugin --profile web add dsh-comfyui`（装最新 0.4.0）/ `dsh plugin --profile web add dsh-comfyui@beta`（老宿主装 0.3.x）。
 
 ## 功能
 

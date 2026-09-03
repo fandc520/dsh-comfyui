@@ -16,7 +16,14 @@
   <img src="https://img.shields.io/npm/l/dsh-comfyui" alt="license" />
 </p>
 
-> **Requires DeepSeek Harness >= 0.1.2-alpha.4.** From 0.4.0 this plugin uses the new settings service API; on older dsh versions stay on the 0.3.x line.
+> **Version pairing (pick the right dsh before installing, otherwise dshmarket shows a risk banner)**:
+>
+> | dsh-comfyui | Paired DeepSeek Harness | Notes |
+> | --- | --- | --- |
+> | **0.4.0 (latest, `latest` tag)** | **>= 0.1.2** | From 0.4.0 this plugin uses the new settings service API |
+> | **0.3.x (beta line, `beta` tag)** | **0.1.1** | On older dsh versions stay on the 0.3.x line |
+>
+> Install: `dsh plugin --profile web add dsh-comfyui` (latest 0.4.0) / `dsh plugin --profile web add dsh-comfyui@beta` (0.3.x for older hosts).
 
 ## Features
 
