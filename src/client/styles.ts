@@ -94,6 +94,9 @@ select.dsc-input option { background: var(--dsw-alias-bg-layer-1); color: var(--
 }
 .dsc-panel-resize:hover { opacity: 1; }
 .dsc-panel-title { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 14px; }
+.dsc-panel-head-actions { display: inline-flex; align-items: center; gap: 2px; }
+.dsc-panel-reset { border: none; background: transparent; color: var(--dsw-alias-label-tertiary); cursor: pointer; font-size: 13px; padding: 4px 6px; line-height: 1; }
+.dsc-panel-reset:hover { color: var(--dsw-alias-label-primary); }
 .dsc-panel-close { border: none; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; font-size: 14px; padding: 4px 8px; }
 .dsc-panel-close:hover { color: var(--dsw-alias-label-primary); }
 .dsc-tabs { display: flex; border-bottom: 1px solid var(--dsw-alias-border-l1); }
@@ -144,7 +147,12 @@ select.dsc-input option { background: var(--dsw-alias-bg-layer-1); color: var(--
 .dsc-skill-files { flex: 0 0 190px; min-width: 160px; display: flex; flex-direction: column; gap: 6px; }
 .dsc-skill-main { flex: 1 1 300px; min-width: 260px; display: flex; flex-direction: column; gap: 6px; }
 .dsc-skill-bucket { display: flex; flex-direction: column; gap: 2px; }
-.dsc-skill-bucket-name { font-size: 11px; color: var(--dsw-alias-label-secondary); margin-top: 4px; }
+/* Foldable pack directories: each folder renders as a <details> whose header
+   stays put while its files collapse, keeping crowded packs scannable. */
+.dsc-skill-fold { border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; margin: 2px 0; }
+.dsc-skill-fold summary { padding: 5px 10px; font-size: 12px; color: var(--dsw-alias-label-secondary); border-radius: 8px; }
+.dsc-skill-fold[open] summary { color: var(--dsw-alias-label-primary); border-bottom: 1px solid var(--dsw-alias-border-l1); border-radius: 8px 8px 0 0; }
+.dsc-skill-fold .dsc-skill-bucket { padding: 4px 6px 6px; }
 .dsc-skill-file {
   display: flex; align-items: center; justify-content: space-between; gap: 6px;
   border: 1px solid transparent; border-radius: 6px; background: transparent;

@@ -16,6 +16,8 @@
   <img src="https://img.shields.io/npm/l/dsh-comfyui" alt="license" />
 </p>
 
+> **要求 DeepSeek Harness ≥ 0.1.2-alpha.4。** 0.4.0 起使用新版 settings 服务 API；老版本 dsh 请留在 0.3.x 线。
+
 ## 功能
 
 ### Agent 工具

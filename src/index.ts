@@ -5,9 +5,10 @@
  * plugin fiber.
  */
 import type { Context } from '@deepseek-ai/cordis'
+// Type-only: augments cordis Context with ctx.settings used by the inject below
+import type {} from '@deepseek-ai/dsh-settings'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { Config, type Config as ConfigType } from './config.js'
 import { ComfyUIClient, CLIENT_ID } from './comfyui.js'
 import { ComfyUIStore } from './store.js'
@@ -37,7 +38,7 @@ export { Config }
  */
 export const inject = ['tools']
 
-const COMFYUI_NS = settingsNamespace('comfyui')
+const COMFYUI_NS = 'comfyui'
 
 /** object_info is large and changes only when nodes are (re)installed. */
 const OBJECT_INFO_TTL_MS = 60_000
@@ -337,13 +338,15 @@ export async function apply(ctx: Context, entryConfig: Partial<ConfigType>): Pro
   // The settings section rides the plugin fiber: a host without a settings
   // service simply never registers it, and the entry config stands as composed.
   let source: () => ConfigType = () => resolved
-  installSettingsSection(ctx, COMFYUI_NS, Config, resolved, {
-    setSource: (current) => {
-      source = current as () => ConfigType
-    },
-    onChange: () => {
-      Object.assign(resolved, source())
-    },
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.installSection(ctx, COMFYUI_NS, Config, resolved, {
+      setSource: (current) => {
+        source = current as () => ConfigType
+      },
+      onChange: () => {
+        Object.assign(resolved, source())
+      },
+    })
   })
 
   ctx.effect(() => {

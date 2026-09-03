@@ -16,6 +16,8 @@
   <img src="https://img.shields.io/npm/l/dsh-comfyui" alt="license" />
 </p>
 
+> **Requires DeepSeek Harness >= 0.1.2-alpha.4.** From 0.4.0 this plugin uses the new settings service API; on older dsh versions stay on the 0.3.x line.
+
 ## Features
 
 ### Agent tools

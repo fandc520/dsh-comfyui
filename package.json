@@ -1,6 +1,6 @@
 {
   "name": "dsh-comfyui",
-  "version": "0.3.0-beta.6",
+  "version": "0.4.0",
   "description": "Let the DeepSeek Harness agent smartly drive a local or remote ComfyUI to generate anything, with workflow and asset management panels, per-workflow skill packs, a companion skill and a same-origin media proxy. / 让 DeepSeek Harness 的 Agent 智能驱动本地或远程 ComfyUI 生成任何内容。附带工作流、资产管理面板与技能包管理挂载。配套 skill 与同源媒体代理。",
   "repository": {
     "type": "git",
@@ -53,16 +53,11 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-settings": "^0.1.0-rc.7"
-  },
-  "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-settings": {
-      "optional": true
-    }
+    "@deepseek-ai/dsh-settings": "^0.1.2-alpha.4"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-settings": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-settings": "^0.1.2-alpha.4",
     "@types/node": "^24.0.0",
     "@types/react": "~18.3.1",
     "react": "^18.3.1",

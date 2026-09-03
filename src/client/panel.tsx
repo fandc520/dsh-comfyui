@@ -45,6 +45,37 @@ function saveGeom(geom: PanelGeom): void {
   }
 }
 
+/** Default panel width from styles.ts (`.dsc-panel` width var), used only to
+ * estimate the panel extent while clamping a saved position. */
+const PANEL_WIDTH_FALLBACK = 400
+/** Approx. height of the drag-handle band (`.dsc-panel-head`). */
+const HEAD_BAND = 48
+/** Minimum margin kept between the panel and the viewport edge. */
+const EDGE = 8
+
+/**
+ * Clamp a top-left corner so the drag-handle band always stays inside the
+ * viewport. The failure this prevents: once the header is pushed past the top
+ * edge (or a saved position from a larger monitor no longer fits), there is no
+ * grab surface left and the panel cannot be moved back at all.
+ */
+function clampPos(x: number, y: number, width: number, vw: number, vh: number): { x: number; y: number } {
+  const maxX = Math.max(EDGE, vw - width - EDGE)
+  const maxY = Math.max(EDGE, vh - HEAD_BAND - EDGE)
+  return { x: Math.min(Math.max(x, EDGE), maxX), y: Math.min(Math.max(y, EDGE), maxY) }
+}
+
+/** Snap persisted geometry back within reach of the cursor. Geometry that
+ * never carried an explicit position (the CSS-anchored default) is returned
+ * unchanged; geometry already inside the safe area keeps its object identity
+ * so callers can skip pointless re-renders. */
+function healGeom(geom: PanelGeom, vw: number, vh: number): PanelGeom {
+  if (geom.x === undefined || geom.y === undefined) return geom
+  const pos = clampPos(geom.x, geom.y, geom.width ?? PANEL_WIDTH_FALLBACK, vw, vh)
+  if (pos.x === geom.x && pos.y === geom.y) return geom
+  return { ...geom, x: pos.x, y: pos.y }
+}
+
 interface PointerEventLike {
   pointerId: number
   clientX: number
@@ -999,7 +1030,7 @@ function formatBytes(bytes: number | undefined): string {
 export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | null {
   const open = usePanelOpen()
   const tab = usePanelTab()
-  const [geom, setGeom] = useState<PanelGeom>(loadGeom)
+  const [geom, setGeom] = useState<PanelGeom>(() => healGeom(loadGeom(), window.innerWidth, window.innerHeight))
   const [dragging, setDragging] = useState<'move' | 'resize' | null>(null)
   const [lightbox, setLightbox] = useState<{ images: string[]; kinds: Array<'image' | 'video' | 'audio' | 'other'>; index: number } | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
@@ -1008,9 +1039,24 @@ export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | n
   const openPreview = (images: string[], kinds: Array<'image' | 'video' | 'audio' | 'other'>, index: number): void => setLightbox({ images, kinds, index })
 
   useEffect(() => {
-    if (open) return
+    if (open) {
+      // The window may have been resized or moved to another monitor while the
+      // panel was closed, or the saved position may predate the reachability
+      // clamp — snap a header that ended up out of reach back into the viewport.
+      setGeom((prev) => healGeom(prev, window.innerWidth, window.innerHeight))
+      return
+    }
     saveGeom(geom)
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
+  // While the panel is open, keep the header reachable across viewport
+  // resizes too (shrinking the window can otherwise strand it off-screen).
+  useEffect(() => {
+    if (!open) return
+    const onResize = (): void => setGeom((prev) => healGeom(prev, window.innerWidth, window.innerHeight))
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
   }, [open])
 
   const startDrag = (event: PointerEventLike, mode: 'move' | 'resize'): void => {
@@ -1034,11 +1080,15 @@ export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | n
     const d = dragRef.current
     if (d === null) return
     if (dragging === 'move') {
-      setGeom((prev) => ({
-        ...prev,
-        x: Math.round(d.origX + event.clientX - d.startX),
-        y: Math.round(d.origY + event.clientY - d.startY),
-      }))
+      // Clamp while dragging so the header can never be pushed out of reach.
+      const pos = clampPos(
+        Math.round(d.origX + event.clientX - d.startX),
+        Math.round(d.origY + event.clientY - d.startY),
+        d.width,
+        window.innerWidth,
+        window.innerHeight,
+      )
+      setGeom((prev) => ({ ...prev, x: pos.x, y: pos.y }))
     } else if (dragging === 'resize') {
       const width = Math.max(300, Math.min(720, d.width + event.clientX - d.startX))
       const height = Math.max(200, Math.min(Math.max(300, window.innerHeight - 40), d.height + event.clientY - d.startY))
@@ -1081,11 +1131,29 @@ export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | n
         h('span', { className: 'dsc-trigger-glyph' }, h(ComfyUIIcon)),
         h('span', null, t('panelTitle')),
       ),
-      h('button', {
-        className: 'dsc-panel-close',
-        'aria-label': t('close'),
-        onClick: () => panelStore.close(),
-      }, '✕'),
+      h('span', { className: 'dsc-panel-head-actions' },
+        h('button', {
+          className: 'dsc-panel-reset',
+          type: 'button',
+          title: t('panelReset'),
+          'aria-label': t('panelReset'),
+          onClick: () => {
+            // Restore the CSS-anchored default (right side, 400px wide) and
+            // clear the stored geometry so the default also survives refresh.
+            setGeom({})
+            try {
+              localStorage.removeItem(GEOM_KEY)
+            } catch {
+              // storage unavailable — nothing persisted anyway
+            }
+          },
+        }, '↺'),
+        h('button', {
+          className: 'dsc-panel-close',
+          'aria-label': t('close'),
+          onClick: () => panelStore.close(),
+        }, '✕'),
+      ),
     ),
     h('div', { className: 'dsc-tabs' },
       h(TabButton, { t, active: tab === 'workflows', label: t('tabWorkflows'), onClick: () => panelStore.setTab('workflows') }),
@@ -1637,6 +1705,29 @@ function SkillPackEditor(props: {
     }
   }, [props.workflow.id, openFile])
 
+  /** Re-read the pack listing and — only when nothing is unsaved — the file
+   * currently open, so files added or replaced outside this panel (the agent
+   * writing via comfyui_skill, or the file manager after `打开目录`) show up
+   * without leaving and re-entering the view. */
+  const refreshFiles = async (): Promise<void> => {
+    setBusy(true)
+    setNotice(null)
+    try {
+      const data = await getJson<SkillPackResponse>(`/comfyui/workflows/skill?id=${encodeURIComponent(props.workflow.id)}`)
+      setEnabled(data.enabled === true)
+      setPack(data.pack ?? null)
+      if (Array.isArray(data.presetDirs) && data.presetDirs.length > 0) setPresetDirs(data.presetDirs)
+      setError(null)
+      props.onChanged()
+      if (data.enabled === true && !dirty) await openFile(active)
+      setNotice(t('skillRefreshed'))
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   useEffect(() => {
     void refresh()
   }, [refresh])
@@ -1810,6 +1901,16 @@ function SkillPackEditor(props: {
    * presets it has not used yet. */
   const targetDirs = [...packDirs, ...presetDirs.filter((dir) => !packDirs.includes(dir))]
 
+  /** One row in the pack file list; clicking opens it for editing. */
+  const fileButton = (file: SkillPackFile): ReturnType<typeof h> => h('button', {
+    key: file.path,
+    className: `dsc-skill-file${file.path === active ? ' dsc-skill-file--active' : ''}`,
+    onClick: () => selectFile(file.path),
+  },
+    h('span', { className: 'dsc-skill-file-name' }, file.path.includes('/') ? file.path.split('/')[1] : file.path),
+    h('span', { className: 'dsc-skill-file-size' }, formatBytes(file.size)),
+  )
+
   const fileList = h('div', {
     className: 'dsc-skill-files',
     onDragOver: (event: { preventDefault: () => void }) => event.preventDefault(),
@@ -1856,6 +1957,12 @@ function SkillPackEditor(props: {
         title: t('skillRevealHint'),
         onClick: () => void revealDir(),
       }, t('skillReveal')),
+      h('button', {
+        className: 'dsc-btn dsc-btn--sm',
+        disabled: busy,
+        title: t('skillRefreshHint'),
+        onClick: () => void refreshFiles(),
+      }, t('skillRefresh')),
     ),
     creatingDir === null
       ? null
@@ -1878,17 +1985,16 @@ function SkillPackEditor(props: {
     h('div', { className: 'dsc-skill-drop-hint' }, t('skillDropHint')),
     buckets.map((bucket) => bucket.items.length === 0 && bucket.label !== ''
       ? null
-      : h('div', { key: bucket.label === '' ? '.' : bucket.label, className: 'dsc-skill-bucket' },
-        bucket.label !== '' ? h('div', { className: 'dsc-skill-bucket-name' }, `${bucket.label}/`) : null,
-        bucket.items.map((file) => h('button', {
-          key: file.path,
-          className: `dsc-skill-file${file.path === active ? ' dsc-skill-file--active' : ''}`,
-          onClick: () => selectFile(file.path),
-        },
-          h('span', { className: 'dsc-skill-file-name' }, file.path.includes('/') ? file.path.split('/')[1] : file.path),
-          h('span', { className: 'dsc-skill-file-size' }, formatBytes(file.size)),
-        )),
-      )),
+      : bucket.label === ''
+        // Root files (SKILL.md and anything dropped at the top level) are
+        // always visible; only directories fold, so a crowded pack can be
+        // collapsed per folder.
+        ? h('div', { key: '.', className: 'dsc-skill-bucket' }, bucket.items.map(fileButton))
+        : h('details', { key: bucket.label, className: 'dsc-fold dsc-skill-fold', open: true },
+          h('summary', null, `${bucket.label}/`),
+          h('div', { className: 'dsc-skill-bucket' }, bucket.items.map(fileButton)),
+        ),
+    ),
     creating === null
       ? null
       : h('div', { className: 'dsc-skill-create' },
@@ -2013,7 +2119,6 @@ function SkillPackEditor(props: {
         }),
         t('skillRequired'),
       ),
-      h('span', { className: 'dsc-hint' }, t('skillRequiredHint')),
     ),
     pack !== null ? h('div', { className: 'dsc-skill-dir', title: pack.dir }, `${t('skillDir')}: ${pack.dir}`) : null,
     pendingOpen !== null
