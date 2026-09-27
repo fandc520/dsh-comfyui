@@ -445,7 +445,7 @@ function summarizeFields(fields: Record<string, unknown> | undefined, required: 
     } else if (typeof typeOrList === 'string') {
       entry.type = typeOrList
     }
-    if (optionsRecord !== undefined && 'default' in optionsRecord) {
+    if (optionsRecord !== undefined && optionsRecord.default !== undefined) {
       entry.default = optionsRecord.default
     }
     out.push(entry)
@@ -492,16 +492,23 @@ function objectInfoDefinition(runtime: ComfyUIRuntime): ToolDefinition {
         : entries.filter(([name]) => name.toLowerCase().includes(filter))
       const nodes = filtered.slice(0, 60).map(([classType, def]) => ({
         class_type: classType,
-        display_name: def.display_name,
+        // Omitted rather than assigned undefined: a key holding undefined makes the
+        // whole result fail DSH's lossless-JSON validation. The render type already
+        // declares display_name optional.
+        ...(def.display_name !== undefined ? { display_name: def.display_name } : {}),
         description: (def.description ?? '').slice(0, 200),
         required: summarizeFields(def.input?.required, true),
         optional: summarizeFields(def.input?.optional, false),
       }))
+      const hint = filtered.length > nodes.length
+        ? `filter matched ${filtered.length} nodes, showing first ${nodes.length} — narrow the filter for more`
+        : undefined
       return {
         total: entries.length,
         shown: nodes.length,
         filter: filter ?? null,
-        hint: filtered.length > nodes.length ? `filter matched ${filtered.length} nodes, showing first ${nodes.length} — narrow the filter for more` : undefined,
+        // Omitted rather than assigned undefined, same reason as display_name.
+        ...(hint !== undefined ? { hint } : {}),
         nodes,
       }
     },
@@ -540,7 +547,7 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
         const data = value as {
           action: string
           env?: { baseUrl: string; comfyuiDirs: string[] }
-          workflows?: Array<{ id: string; name: string; description: string; skill?: { summary: string; files: number; required: boolean }; parameters?: Array<{ name: string; label: string; type: string; default?: string | number | boolean; random?: boolean; numberKind?: 'int' | 'float'; options?: Array<string | number>; upload?: 'image' | 'video' | 'audio' | 'media'; subfolder?: string }> }>
+          workflows?: Array<{ id: string; name: string; description: string; skill?: { summary: string; files: number; required: boolean }; parameters?: Array<{ name: string; label?: string; type?: string; default?: string | number | boolean; random?: boolean; numberKind?: 'int' | 'float'; options?: Array<string | number>; upload?: 'image' | 'video' | 'audio' | 'media'; subfolder?: string }> }>
           comfyuiWorkflows?: Array<{ name: string; extracted: boolean; derived: Array<{ libraryId: string; name: string }> }>
           loadArea?: { slots: number; loaded: number; items: Array<{ name: string; kind: string; source: string }> }
           result?: RunResult
@@ -608,12 +615,13 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
               lines.push(`  技能包${skill.required ? '（运行前必读）' : ''}: ${skill.summary}${extra} — 运行前先 action: skill { id: "${workflow.id}" }`)
             }
             for (const param of workflow.parameters ?? []) {
-              const def = typeof param.default === 'string' ? `"${param.default}"` : String(param.default)
+              const label = param.label ?? param.name
+              const def = param.default === undefined ? '' : `，默认 ${typeof param.default === 'string' ? `"${param.default}"` : String(param.default)}`
               const options = Array.isArray(param.options) && param.options.length > 0 ? `，可选: ${param.options.join(' / ')}` : ''
               const upload = param.upload !== undefined
                 ? `，上传类型: ${param.upload}${param.upload === 'media' ? `（${param.subfolder ?? ''}/，空值=移除该参考位）` : ''}`
                 : ''
-              lines.push(`  ${param.name}(${param.label}${param.random === true ? '，随机' : ''}，默认 ${def}${options}${upload})`)
+              lines.push(`  ${param.name}(${label}${param.random === true ? '，随机' : ''}${def}${options}${upload})`)
             }
           }
           const loadArea = data.loadArea
@@ -701,7 +709,10 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
             parameters: (parameters ?? []).map(({ name: pname, label, type, default: def, random, numberKind, options, upload }) => {
               // DSH validates tool output as lossless JSON: JSON.stringify drops
               // undefined keys, so omit optional fields instead of passing undefined.
-              const entry: Record<string, unknown> = { name: pname, label, type, default: def }
+              const entry: Record<string, unknown> = { name: pname }
+              if (label !== undefined) entry.label = label
+              if (type !== undefined) entry.type = type
+              if (def !== undefined) entry.default = def
               if (random !== undefined) entry.random = random
               // Tells the model whether decimals are accepted; absent means the
               // node's declared type is unknown and a float is safe.
