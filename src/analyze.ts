@@ -6,7 +6,7 @@
  * the extract (拆分) choices in the panel and the agent-facing skill.
  */
 
-import { normalizeLinks } from './graph.js'
+import { isVirtualNodeType, normalizeLinks, resolveVirtualLinks } from './graph.js'
 
 export interface GraphNodeLike {
   id: number
@@ -81,12 +81,16 @@ export function analyzeGraph(graph: unknown): GraphAnalysis | { ok: false; error
     return { ok: false, error: '无法解析图文件（缺少 nodes/links）' }
   }
   const nodes = graph.nodes as GraphNodeLike[]
-  const links = normalizeLinks(graph.links)
+  // Virtual nodes (Set/Get wireless links, rgthree mode relays) are rewired
+  // out first, exactly as conversion does, so components follow the real data
+  // flow and the virtual nodes themselves never show up as components or as
+  // dangling nodes (Issue #8).
+  const links = resolveVirtualLinks(graph.nodes, normalizeLinks(graph.links))
   const groups = Array.isArray(graph.groups) ? (graph.groups as GraphGroupLike[]) : []
 
-  const active = nodes.filter((node) => node.mode !== 4)
+  const active = nodes.filter((node) => node.mode !== 4 && !isVirtualNodeType(node.type))
   const activeById = new Map(active.map((node) => [node.id, node]))
-  const bypassedCount = nodes.length - active.length
+  const bypassedCount = nodes.filter((node) => node.mode === 4).length
 
   // Dangling nodes: active but touching no link at all.
   const linkedIds = new Set<number>()

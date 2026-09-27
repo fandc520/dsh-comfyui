@@ -7,7 +7,7 @@
  * Reroute / bypassed (mode 4) nodes are skipped with their links rewired.
  * Nodes the conversion cannot represent fail loudly with the offending type.
  */
-import { normalizeLinks, type GraphLink } from './graph.js'
+import { isVirtualNodeType, normalizeLinks, resolveVirtualLinks, type GraphLink } from './graph.js'
 
 export interface ApiWorkflow {
   [nodeId: string]: { class_type: string; inputs: Record<string, unknown> }
@@ -309,7 +309,9 @@ export function convertGraphToApi(
   // normalizeLinks accepts both the legacy positional rows and the v0.4
   // frontend's object entries; anything unreadable is skipped, exactly like
   // the old array-only guard did.
-  for (const link of normalizeLinks(rawLinks)) links.set(link[0], link)
+  // Set/Get wireless links and rgthree mode relays are rewired out before
+  // anything resolves a link (Issue #8), shared with analyzeGraph.
+  for (const link of resolveVirtualLinks(rawNodes, normalizeLinks(rawLinks))) links.set(link[0], link)
   const nodesById = new Map(nodes.map((node) => [node.id, node]))
   const included = options?.includeNodeIds
   const candidates = included !== undefined ? nodes.filter((node) => included.has(node.id)) : nodes
@@ -328,7 +330,7 @@ export function convertGraphToApi(
   const brokenInputs = new Map<string, string[]>()
   const dropReasons = new Map<string, string>()
   for (const node of candidates) {
-    if (node.type === '' || UI_ONLY.has(node.type)) continue
+    if (node.type === '' || UI_ONLY.has(node.type) || isVirtualNodeType(node.type)) continue
     if (node.mode === 4) continue
     if (node.type.startsWith('workflow')) {
       return { ok: false, error: `包含子图节点 "${node.type}"，暂不支持转换` }

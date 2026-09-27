@@ -22,6 +22,7 @@ npm pack --dry-run   # 发布前必查：README 引用的资源都要在 files �
 node scripts/test-store-params.mjs   # 离线自测：参数保存/重载（需先 build）
 node scripts/test-skillpack.mjs      # 离线自测：技能包 CRUD / 路径穿越防护（需先 build）
 node scripts/test-transfer.mjs       # 离线自测：预设导出/导入回环（需先 build）
+node scripts/test-convert.mjs        # 离线自测：画布分析与图→API 转换回归（需先 build）
 ```
 
 **改动生效规则**：`src/*.ts`（host：tools/routes/store/params/skill…）改完要 **重启 DSH**；`src/client/*` 改完 **刷新页面** 即可。skill 文本编译进 `lib/skill.js`，属 host 侧。
@@ -63,6 +64,7 @@ Agent ──tools──┐
 | `queue.ts` | `QueueTracker`：记住本插件提交过的 prompt，`sweep()` 在读取（queue/assets 路由）时把完成的运行归档进资产索引；无后台定时器。 |
 | `progress.ts` | `ProgressTracker`：连 ComfyUI `/ws` 收 `progress` 事件，best-effort（远端鉴权代理下可能无进度），断线重连直到 dispose。 |
 | `analyze.ts` | 画布分析：groups 无执行语义，可执行单元 = 激活节点的连通分量，忽略 bypass(mode 4) 与悬空 UI 节点；bypass 节点按与 `convert.ts` 相同的直通规则（输出跟随**第一个**有连线的输入）连接上下游，否则分量会被切断、「主流程」漏掉上游（#8）。 |
+| `graph.ts` | 图的公共预处理：`normalizeLinks`（位置行 / v0.4 对象行两种 links 统一成 `[id, origin, slot, target, slot, type]`）；`resolveVirtualLinks` 在分析与转换**之前**把虚拟节点改线——KJNodes `SetNode`/`GetNode` 按名称配对（同名取 `order` 小于 getter 的最大者），rgthree `Mute / Bypass Relay/Repeater` 的模式传播连线直接丢弃（#8）；link id 保持不变，节点 `inputs[].link` 引用仍有效。 |
 | `convert.ts` | 图 → API 转换：链接变 `[String(nodeId), slot]`，widgets_values 按图节点自身 `inputs` 顺序对齐，Reroute/bypass 直通，无法表达的节点报错。产物做引用完整性检查（所有 `[id, slot]` 必须指向同一产物内的节点）。`COMFY_DYNAMICCOMBO_V3` 保持**扁平**（见契约 15），并校验所选 key 在可选项内；`flattenDynamicCombos` 在排队时把 0.2.0–0.5.1 存下的 `{ key, inputs }` 旧形状摊平。 |
 | `params.ts` | 可调参数：自动识别（提示词/分辨率/步数/种子/时长/宽高比/加载节点）+ 用户高级参数；`numberSpecOf` 从 object_info 读数字输入的声明类型（INT/FLOAT + min/max/step），存进参数的 `numberKind`；`applyWorkflowParameters` 在运行时写回工作流（int 四舍五入、bool 归一化 `"true"`/`0` 这类写法、连线输入与加载参数不被空默认值覆盖、未传值的加载参数按加载位顺序取用）；`refreshParameterMetadata` 按最新 object_info 重算**已有**参数的 options / numberKind / min/max/step（参数集合与默认值一个不动，供快照刷新路由/工具用，返回 `{ parameters, changed }`）。 |
 | `templates.ts` | 内置 API 模板：`txt2img`、`img2img`（核心节点）、`video`（Wan 2.1，需 ComfyUI-WanVideoWrapper）。 |
@@ -137,6 +139,7 @@ Agent ──tools──┐
 | `inspect-tool-meta.mjs` | 按 promptId 查会话日志里的 tool-result meta，排查媒体回显 |
 | `test-store-params.mjs` | 离线自测：参数经 store 保存 → 重载 → 编辑后仍保留（需先 `npm run build`，它导入 `lib/store.js`） |
 | `test-skillpack.mjs` | 离线自测：技能包 slug / frontmatter / 文件 CRUD / 尺寸上限 / 路径穿越防护 / 工作流绑定（需先 `npm run build`，它导入 `lib/skillpack.js`） |
+| `test-convert.mjs` | 离线自测：画布分析与图→API 转换——DynamicCombo 扁平（#10）、bypass 直通与越界引用拒绝（#8）、Set/Get 按名配对（作用域、链式、直通输出、缺 setter）、rgthree Relay/Repeater 连线丢弃（#8）（需先 `npm run build`，它导入 `lib/analyze.js`、`lib/convert.js`） |
 | `test-transfer.mjs` | 离线自测：预设导出→分析→导入回环（参数/技能包字节/空目录/requireSkill 逐项断言）、重名 `（导入）` 后缀、zip-slip 防护、格式与版本拒绝（需先 `npm run build`，它导入 `lib/transfer.js`） |
 | `run-cg-portrait.mjs` / `run-16x9.mjs` | 真机冒烟：打同源路由（默认 `http://127.0.0.1:3080`）跑一次带自定义 prompt 的工作流，需 DSH + ComfyUI 都在运行 |
 

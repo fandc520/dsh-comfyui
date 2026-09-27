@@ -69,6 +69,9 @@ TTS-Audio-Suite（\`{comfyuiDir}/custom_nodes/tts_audio_suite\`）的"🎭 Chara
 - **\`control_after_generate\` 占位**：名为 \`seed\`/\`noise_seed\` 的 INT（或 object_info 显式声明 \`control_after_generate\`）前面端会渲染生成后控制下拉，其值占据 widgets_values 一个槽位但无 API 输入——提取时消费该值但不写入工作流，否则后续 widget 全部错位（如 TTS-Audio-Suite 的 seed 后跟 "fixed"）。
 - **对象型 widgets_values**（如 VHS_VideoCombine）按名取值，跳过内部状态（\`videopreview\` 等带 \`hidden\` 的对象）。
 - **Reroute 与 bypass（mode 4）节点直通**：输出跟随其第一条有连线的输入。
+- **虚拟节点先改线再转换**（分析与转换共用同一规则）：KJNodes \`SetNode\`/\`GetNode\` 按名称配对——\`GetNode\` 的输出接到同名 \`SetNode\` 的上游（同名多个时取 \`order\` 小于它的最大者），找不到对应 \`SetNode\` 的消费端保持未连接；rgthree \`Mute / Bypass Relay\`/\`Repeater\` 的连线只传播静音/绕过状态、不传数据，直接丢弃（状态已保存在各节点的 \`mode\` 里）。
+- **DynamicCombo V3 保持扁平**：主输入的值是所选 option key 字符串，子控件以 \`主名.子名\` 平铺（如 \`codec: "auto"\`），不要包成 \`{ key, inputs }\`——服务端会自己重组，包起来反而匹配不上，节点在 execute 时报缺参数。
+- **子图（subgraph）实例不支持**：遇到请让用户在 ComfyUI 里把子图转换回普通节点后再提取。
 - **未注册的 UI-only 节点**：若是 \`Primitive*\` 内联其第一个 widget 值；有输出被使用且非 Primitive → 报错。
 - **输出槽位越界**（保存图里 SaveImage 声称 2 个输出但服务端只有 1 个）→ 断开该引用并给警告。
 - **必需输入缺失**（required 里没有、且非 lazy/template 类型）→ 明确报错（源图本身断线），不产出"能转但跑不起来"的工作流。\`COMFY_AUTOGROW_V3\`/带 \`template\`/带 \`lazy\` 的输入豁免。
