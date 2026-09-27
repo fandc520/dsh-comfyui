@@ -13,7 +13,7 @@ import { Config, type Config as ConfigType } from './config.js'
 import { ComfyUIClient, CLIENT_ID } from './comfyui.js'
 import { ComfyUIStore } from './store.js'
 import { QueueTracker } from './queue.js'
-import { convertGraphToApi } from './convert.js'
+import { convertGraphToApi, flattenDynamicCombos } from './convert.js'
 import { analyzeGraph } from './analyze.js'
 import { ProgressTracker } from './progress.js'
 import { COMFYUI_SKILL } from './skill.js'
@@ -199,7 +199,8 @@ export async function apply(ctx: Context, entryConfig: Partial<ConfigType>): Pro
     },
     queue: async (workflow, meta) => {
       const client = runtime.createClient(await resolveApiKey(ctx, resolved.apiKeyEnv))
-      let prompt = workflow as unknown as Workflow
+      // Heals library entries saved with the pre-0.5.2 wrapped DynamicCombo shape (Issue #10).
+      let prompt = flattenDynamicCombos(workflow as unknown as Workflow)
       if (meta.parameters !== undefined && meta.parameters.length > 0) {
         const objectInfo = await objectInfoCached(client)
         const slots = await store.loadSlots()

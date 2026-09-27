@@ -279,7 +279,14 @@ export function mountComfyUIRoutes(ctx: Context, runtime: ComfyUIRuntime): (() =
           latencyMs: Date.now() - startedAt,
         })
       } catch (error) {
-        sendJson(response, 200, { ok: false, error: errorMessage(error), latencyMs: Date.now() - startedAt })
+        // Name the probed address: a save that never persisted leaves the
+        // default 127.0.0.1:8188 in force, and a bare "fetch failed" reads
+        // like a network problem with the address the user typed (Issue #11).
+        sendJson(response, 200, {
+          ok: false,
+          error: `${errorMessage(error)}（探测地址 ${runtime.getConfig().baseUrl}）`,
+          latencyMs: Date.now() - startedAt,
+        })
       }
     }),
   }))

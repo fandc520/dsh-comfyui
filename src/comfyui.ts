@@ -139,6 +139,15 @@ export function guessContentType(filename: string): string {
 /** The per-process client id ComfyUI uses to correlate queued prompts. */
 export const CLIENT_ID = randomUUID()
 
+/**
+ * Route prefix learned per base URL: '' when bare routes answer, '/api' when
+ * only the /api-prefixed mirror does. ComfyUI serves every route under both,
+ * but API-only reverse proxies (comfy-api-proxy, Issue #6) forward just
+ * `/api/*`, so the bare /system_stats probe 404s. Learned on the first
+ * request and kept for the process — clients are created per call.
+ */
+const routePrefix = new Map<string, '' | '/api'>()
+
 /** HTTP client over the ComfyUI REST API. */
 export class ComfyUIClient {
   constructor(
@@ -148,8 +157,33 @@ export class ComfyUIClient {
     private readonly maxMediaBytes: number,
   ) {}
 
+  private base(): string {
+    return this.baseUrl.replace(/\/+$/, '')
+  }
+
   private endpoint(path: string): string {
-    return `${this.baseUrl.replace(/\/+$/, '')}${path}`
+    if (path.startsWith('/api/')) return `${this.base()}${path}`
+    return `${this.base()}${routePrefix.get(this.base()) ?? ''}${path}`
+  }
+
+  /** fetch() one route, retrying a 404 under /api until the prefix is known. */
+  private async fetchRoute(path: string, init: RequestInit): Promise<Response> {
+    const base = this.base()
+    const response = await fetch(this.endpoint(path), init)
+    if (path.startsWith('/api/') || routePrefix.has(base)) return response
+    if (response.ok) {
+      routePrefix.set(base, '')
+      return response
+    }
+    if (response.status !== 404) return response
+    const retry = await fetch(`${base}/api${path}`, init)
+    if (!retry.ok) {
+      await retry.body?.cancel()
+      return response
+    }
+    routePrefix.set(base, '/api')
+    await response.body?.cancel()
+    return retry
   }
 
   private async request<T>(path: string, init: RequestInit = {}, timeoutMs?: number): Promise<T> {
@@ -158,7 +192,7 @@ export class ComfyUIClient {
     try {
       const headers: Record<string, string> = { ...(init.headers as Record<string, string> | undefined) }
       if (this.apiKey !== undefined) headers['Authorization'] = `Bearer ${this.apiKey}`
-      const response = await fetch(this.endpoint(path), { ...init, headers, signal: controller.signal })
+      const response = await this.fetchRoute(path, { ...init, headers, signal: controller.signal })
       if (!response.ok) {
         const body = await response.text().catch(() => '')
         throw new ComfyUIError(
@@ -380,9 +414,27 @@ export class ComfyUIClient {
 
   /** List one user-data subdirectory (e.g. 'workflows') on the ComfyUI server. */
   async listUserData(subdir: string): Promise<ComfyUIUserDataEntry[]> {
-    const data = await this.request<ComfyUIUserDataEntry[] | string[]>(
-      `/v2/userdata?path=${encodeURIComponent(subdir)}`,
-    )
+    let data: ComfyUIUserDataEntry[] | string[]
+    try {
+      data = await this.request<ComfyUIUserDataEntry[] | string[]>(
+        `/v2/userdata?path=${encodeURIComponent(subdir)}`,
+      )
+    } catch (error) {
+      // Some builds (e.g. the 0.35 desktop app, Issue #5) have no /v2/userdata;
+      // the v1 listing takes `dir` and returns paths relative to it.
+      if (!(error instanceof ComfyUIError) || error.status !== 404) throw error
+      const legacy = await this.request<Array<{ path: string; size?: number; modified?: number }> | string[]>(
+        `/userdata?dir=${encodeURIComponent(subdir)}&recurse=true&split=false&full_info=true`,
+      )
+      if (!Array.isArray(legacy)) return []
+      return legacy.map((item) => {
+        const rel = (typeof item === 'string' ? item : item.path).replace(/\\/g, '/')
+        const entry: ComfyUIUserDataEntry = { name: rel, path: `${subdir}/${rel}`, type: 'file' }
+        if (typeof item !== 'string' && item.size !== undefined) entry.size = item.size
+        if (typeof item !== 'string' && item.modified !== undefined) entry.modified = item.modified
+        return entry
+      })
+    }
     if (!Array.isArray(data)) return []
     if (typeof data[0] === 'string') {
       return (data as string[]).map((name) => ({ name, path: `${subdir}/${name}`, type: 'file' as const }))
@@ -420,7 +472,7 @@ export class ComfyUIClient {
     try {
       const headers: Record<string, string> = {}
       if (this.apiKey !== undefined) headers['Authorization'] = `Bearer ${this.apiKey}`
-      const response = await fetch(this.endpoint(`/view?${params.toString()}`), { headers, signal: controller.signal })
+      const response = await this.fetchRoute(`/view?${params.toString()}`, { headers, signal: controller.signal })
       if (!response.ok) {
         throw new ComfyUIError(`ComfyUI /view failed: HTTP ${response.status}`)
       }
@@ -455,7 +507,7 @@ export class ComfyUIClient {
       const headers: Record<string, string> = {}
       if (this.apiKey !== undefined) headers['Authorization'] = `Bearer ${this.apiKey}`
       if (rangeHeader !== undefined) headers['Range'] = rangeHeader
-      const response = await fetch(this.endpoint(`/view?${params.toString()}`), { headers, method, signal: controller.signal })
+      const response = await this.fetchRoute(`/view?${params.toString()}`, { headers, method, signal: controller.signal })
       if (response.status !== 206 && response.status !== 416 && !response.ok) {
         throw new ComfyUIError(`ComfyUI /view failed: HTTP ${response.status}`)
       }

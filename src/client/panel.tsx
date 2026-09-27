@@ -5,8 +5,8 @@
  * corner handle; geometry persists in localStorage. Renders null while closed
  * (the overlay layer is click-through, so nothing blocks the app underneath).
  */
-import { createElement as h, useCallback, useEffect, useRef, useState } from 'react'
-import { getJson, postJson, postRaw } from './api.ts'
+import { Component, createElement as h, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { getJson, getList, postJson, postRaw } from './api.ts'
 import { panelStore, usePanelOpen, usePanelTab } from './panel-store.ts'
 import { ComfyUIIcon } from './trigger.tsx'
 import { Lightbox } from './lightbox.js'
@@ -1210,9 +1210,12 @@ export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | n
       h(TabButton, { t, active: tab === 'queue', label: t('tabQueue'), onClick: () => panelStore.setTab('queue') }),
     ),
     h('div', { className: 'dsc-panel-body' },
-      tab === 'workflows' ? h(WorkflowsTab, { t })
-        : tab === 'assets' ? h(AssetsTab, { t, onPreview: openPreview })
-          : h(QueueTab, { t, onPreview: openPreview }),
+      // Keyed by tab: switching tabs gives a crashed tab a fresh attempt.
+      h(TabBoundary, { key: tab, t },
+        tab === 'workflows' ? h(WorkflowsTab, { t })
+          : tab === 'assets' ? h(AssetsTab, { t, onPreview: openPreview })
+            : h(QueueTab, { t, onPreview: openPreview }),
+      ),
     ),
     lightbox !== null ? h(Lightbox, {
       t,
@@ -1241,6 +1244,28 @@ function TabButton(props: { t: ComfyUIPanelProps['t']; active: boolean; label: s
 
 function ErrorNote({ t, message }: { t: ComfyUIPanelProps['t']; message: string }): ReturnType<typeof h> {
   return h('div', { className: 'dsc-err' }, `${t('error')}: ${message}`)
+}
+
+/**
+ * Catches a tab's render error and shows it in place. Without this the host's
+ * slot error boundary swallows the whole overlay silently, so a tab crash
+ * reads as "clicking the button does nothing" with a clean console (Issue #5).
+ */
+class TabBoundary extends Component<{ t: ComfyUIPanelProps['t']; children?: ReactNode }, { error: Error | null }> {
+  override state: { error: Error | null } = { error: null }
+
+  static getDerivedStateFromError(error: unknown): { error: Error } {
+    return { error: error instanceof Error ? error : new Error(String(error)) }
+  }
+
+  override componentDidCatch(error: unknown): void {
+    console.error('[dsh-comfyui] panel tab render error', error)
+  }
+
+  override render(): ReactNode {
+    if (this.state.error !== null) return h(ErrorNote, { t: this.props.t, message: this.state.error.message })
+    return this.props.children
+  }
 }
 
 /** Tab 1: workflow library — plugin library + ComfyUI-side saved workflows. */
@@ -2246,15 +2271,13 @@ function WorkflowsTab({ t }: ComfyUIPanelProps): ReturnType<typeof h> {
 
   const load = async (): Promise<void> => {
     try {
-      const data = await getJson<{ workflows: WorkflowEntry[] }>('/comfyui/workflows')
-      setList(data.workflows)
+      setList(await getList<WorkflowEntry>('/comfyui/workflows', 'workflows'))
       setError(null)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     }
     try {
-      const data = await getJson<{ workflows: ComfyUIWorkflowEntry[] }>('/comfyui/comfy-workflows')
-      setComfyui(data.workflows)
+      setComfyui(await getList<ComfyUIWorkflowEntry>('/comfyui/comfy-workflows', 'workflows'))
       setComfyuiError(null)
     } catch (cause) {
       setComfyuiError(cause instanceof Error ? cause.message : String(cause))
@@ -2263,13 +2286,13 @@ function WorkflowsTab({ t }: ComfyUIPanelProps): ReturnType<typeof h> {
 
   useEffect(() => {
     let cancelled = false
-    void getJson<{ workflows: WorkflowEntry[] }>('/comfyui/workflows').then((data) => {
-      if (!cancelled) setList(data.workflows)
+    void getList<WorkflowEntry>('/comfyui/workflows', 'workflows').then((workflows) => {
+      if (!cancelled) setList(workflows)
     }).catch((cause: unknown) => {
       if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause))
     })
-    void getJson<{ workflows: ComfyUIWorkflowEntry[] }>('/comfyui/comfy-workflows').then((data) => {
-      if (!cancelled) setComfyui(data.workflows)
+    void getList<ComfyUIWorkflowEntry>('/comfyui/comfy-workflows', 'workflows').then((workflows) => {
+      if (!cancelled) setComfyui(workflows)
     }).catch((cause: unknown) => {
       if (!cancelled) setComfyuiError(cause instanceof Error ? cause.message : String(cause))
     })
@@ -3094,8 +3117,7 @@ function AssetsTab({ t, onPreview }: { t: ComfyUIPanelProps['t']; onPreview: (im
 
   const load = async (): Promise<void> => {
     try {
-      const data = await getJson<{ assets: AssetEntry[] }>('/comfyui/assets')
-      setAssets(data.assets)
+      setAssets(await getList<AssetEntry>('/comfyui/assets', 'assets'))
       setError(null)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
@@ -3104,8 +3126,8 @@ function AssetsTab({ t, onPreview }: { t: ComfyUIPanelProps['t']; onPreview: (im
 
   useEffect(() => {
     let cancelled = false
-    void getJson<{ assets: AssetEntry[] }>('/comfyui/assets').then((data) => {
-      if (!cancelled) setAssets(data.assets)
+    void getList<AssetEntry>('/comfyui/assets', 'assets').then((items) => {
+      if (!cancelled) setAssets(items)
     }).catch((cause: unknown) => {
       if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause))
     })

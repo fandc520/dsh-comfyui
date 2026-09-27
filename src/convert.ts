@@ -56,6 +56,53 @@ function inputSpec(
   return undefined
 }
 
+/** Option keys a COMFY_DYNAMICCOMBO_V3 spec declares, or undefined when unreadable. */
+function dynamicComboKeys(spec: unknown[]): string[] | undefined {
+  const options = isObject(spec[1]) ? spec[1].options : undefined
+  if (!Array.isArray(options)) return undefined
+  const keys = options
+    .map((option) => (isObject(option) ? option.key : undefined))
+    .filter((key): key is string => typeof key === 'string')
+  return keys.length > 0 ? keys : undefined
+}
+
+/**
+ * Flatten DynamicCombo values that 0.2.0–0.5.1 extraction wrapped as
+ * `{ key, inputs: { sub: value } }` back into the flat API shape
+ * (`master: key`, `master.sub: value`, recursively). Library entries saved by
+ * those versions still carry the wrapped shape; normalizing at queue time
+ * heals them without asking users to re-extract (Issue #10). Returns the same
+ * object when nothing needed flattening.
+ */
+export function flattenDynamicCombos<W extends Record<string, { class_type: string; inputs: Record<string, unknown> }>>(
+  workflow: W,
+): W {
+  const isWrapped = (value: unknown): value is { key: string; inputs: Record<string, unknown> } =>
+    isObject(value) && typeof value.key === 'string' && isObject(value.inputs)
+    && Object.keys(value).every((k) => k === 'key' || k === 'inputs')
+  const flatten = (prefix: string, value: unknown, into: Record<string, unknown>): void => {
+    if (!isWrapped(value)) {
+      into[prefix] = value
+      return
+    }
+    into[prefix] = value.key
+    for (const [sub, subValue] of Object.entries(value.inputs)) flatten(`${prefix}.${sub}`, subValue, into)
+  }
+  let changed = false
+  const out: Record<string, { class_type: string; inputs: Record<string, unknown> }> = {}
+  for (const [id, node] of Object.entries(workflow)) {
+    if (!Object.values(node.inputs).some(isWrapped)) {
+      out[id] = node
+      continue
+    }
+    changed = true
+    const inputs: Record<string, unknown> = {}
+    for (const [name, value] of Object.entries(node.inputs)) flatten(name, value, inputs)
+    out[id] = { ...node, inputs }
+  }
+  return changed ? (out as W) : workflow
+}
+
 /**
  * Derive the ordered widget-input names for one node. The graph's own input
  * array is the source of truth — widgets_values is stored in UI widget order,
@@ -334,18 +381,25 @@ export function convertGraphToApi(
       }
     }
 
-    // Collapse DynamicCombo V3 flat keys back into the API object shape:
-    // { key, inputs: { subWidget: value } } — the master combo's value is the
-    // selected option key, and its `master.sub` siblings become the sub-inputs.
+    // DynamicCombo V3 stays FLAT in the API prompt: the master input holds the
+    // selected option key as a string and its sub-widgets sit beside it as
+    // `master.sub` keys. The server rebuilds the nested shape itself
+    // (DynamicCombo._expand_schema_for_dynamic matches the plain value against
+    // option keys); wrapping it as { key, inputs } never matches, the input is
+    // dropped, and the node dies at execute() — Issue #10 (SaveVideo 'codec').
+    // Validate the selected key here so a bad value fails at extraction rather
+    // than after a full generation.
     for (const [name, value] of Object.entries(inputs)) {
       const spec = inputSpec(objectInfo, node.type, name)
       if (!Array.isArray(spec) || spec[0] !== 'COMFY_DYNAMICCOMBO_V3') continue
-      const sub: Record<string, unknown> = {}
-      for (const [other, otherValue] of Object.entries(inputs)) {
-        if (other.startsWith(`${name}.`)) sub[other.slice(name.length + 1)] = otherValue
+      const keys = dynamicComboKeys(spec)
+      if (keys === undefined || Array.isArray(value)) continue
+      if (typeof value !== 'string' || !keys.includes(value)) {
+        return {
+          ok: false,
+          error: `节点 ${node.type}（id ${node.id}）的输入 ${name} 取值 ${JSON.stringify(value)} 不是可选项之一（${keys.join(' / ')}）——请在 ComfyUI 画布上重新选择后再提取`,
+        }
       }
-      inputs[name] = { key: value, inputs: sub }
-      for (const subName of Object.keys(sub)) delete inputs[`${name}.${subName}`]
     }
 
     workflow[String(node.id)] = { class_type: node.type, inputs }
@@ -353,6 +407,21 @@ export function convertGraphToApi(
 
   if (Object.keys(workflow).length === 0) {
     return { ok: false, error: '转换结果为空（图中没有可执行的节点）' }
+  }
+
+  // Reference integrity: every link must point at a node of this same output.
+  // A component that leaves out an upstream node would otherwise extract as
+  // ok and only fail at run time (Issue #8).
+  for (const [id, node] of Object.entries(workflow)) {
+    for (const [name, value] of Object.entries(node.inputs)) {
+      if (!Array.isArray(value) || value.length !== 2 || typeof value[0] !== 'string' || typeof value[1] !== 'number') continue
+      if (workflow[value[0]] === undefined) {
+        return {
+          ok: false,
+          error: `节点 ${node.class_type}（id ${id}）的输入 ${name} 引用了不在本次提取范围内的节点 ${value[0]}——请改用「整体提取」，或把这部分画布整理成独立的流程`,
+        }
+      }
+    }
   }
 
   // Fail loudly on nodes whose required inputs are missing — the source graph

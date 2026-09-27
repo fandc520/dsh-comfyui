@@ -98,13 +98,34 @@ export function analyzeGraph(graph: unknown): GraphAnalysis | { ok: false; error
     .filter((node) => !linkedIds.has(node.id))
     .map((node) => ({ id: node.id, type: node.type }))
 
+  // Bypassed nodes are pass-throughs at conversion time (resolveOrigin in
+  // convert.ts: the output follows the FIRST wired input). Mirror that rule
+  // here, or a chain `120 → [406 bypassed] → 119` splits into two components
+  // and "main flow" extraction ships 119 referencing a node it left out
+  // (Issue #8).
+  const linkById = new Map(links.map((link) => [link[0], link]))
+  const nodeById = new Map(nodes.map((node) => [node.id, node]))
+  const passThroughOrigin = (originId: number): number | undefined => {
+    let current = originId
+    const visited = new Set<number>()
+    while (nodeById.get(current)?.mode === 4) {
+      if (visited.has(current)) return undefined
+      visited.add(current)
+      const inputLink = (nodeById.get(current)?.inputs ?? []).find((entry) => entry.link !== null)?.link
+      const upstream = inputLink === undefined || inputLink === null ? undefined : linkById.get(inputLink)
+      if (upstream === undefined) return undefined
+      current = upstream[1]
+    }
+    return current
+  }
+
   // Connected components over linked active nodes.
   const adjacency = new Map<number, Set<number>>()
   for (const node of active) adjacency.set(node.id, new Set())
   for (const link of links) {
-    const a = link[1]
+    const a = passThroughOrigin(link[1])
     const b = link[3]
-    if (typeof a !== 'number' || typeof b !== 'number') continue
+    if (a === undefined) continue
     if (!adjacency.has(a) || !adjacency.has(b)) continue
     adjacency.get(a)!.add(b)
     adjacency.get(b)!.add(a)
