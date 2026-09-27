@@ -1453,7 +1453,12 @@ export function mountComfyUIRoutes(ctx: Context, runtime: ComfyUIRuntime): (() =
         const client = runtime.createClient(await runtime.getApiKey())
         const entry = await client.getHistory(promptId)
         if (entry === undefined) {
-          sendJson(response, 200, { ok: true, status: 'unknown' })
+          // No history entry: still waiting in ComfyUI's queue, or evicted.
+          // Tell the two apart so the background card keeps polling a long
+          // queue instead of timing it out as "gone".
+          const queue = await client.getQueue()
+          const waiting = [...queue.queue_running, ...queue.queue_pending].some((item) => item.prompt_id === promptId)
+          sendJson(response, 200, { ok: true, status: waiting ? 'queued' : 'unknown' })
           return
         }
         const statusStr = entry.status?.status_str

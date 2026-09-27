@@ -163,6 +163,13 @@ function ResultCard({ title, result, t }: {
   )
 }
 
+/** Transient-failure retry budget for the jobs/media poll (backoff steps). */
+const POLL_MAX_FAILURES = 20
+/** 'unknown' grace polls (~5 min at 3 s) before treating history as evicted.
+ * The route answers 'queued' while ComfyUI still holds the prompt, so this
+ * only counts polls where the job is in neither history nor the queue. */
+const POLL_UNKNOWN_GRACE = 100
+
 function BackgroundCard({ label, promptId, t }: {
   label: string
   promptId: string
@@ -170,26 +177,77 @@ function BackgroundCard({ label, promptId, t }: {
 }): ReturnType<typeof h> {
   // The tool returns immediately with a background job; this card polls the
   // job's history entry and, once completed, renders the collected media in
-  // place (same wall as a sync result).
-  const [result, setResult] = useState<{ status: string; media?: MediaItem[]; error?: string } | null>(null)
+  // place (same wall as a sync result). Transient route failures (ComfyUI
+  // restarting, proxy hiccup) retry with backoff instead of silently freezing
+  // at "collecting"; an evicted history (server restart / clear) falls back to
+  // the plugin's asset index — which records every completed run's media with
+  // healed proxy URLs — and settles instead of polling forever.
+  const [result, setResult] = useState<{ status: string; media?: MediaItem[]; error?: string; recovered?: boolean } | null>(null)
   const [lightbox, setLightbox] = useState<number | null>(null)
 
   useEffect(() => {
     let stopped = false
     let timer: number | undefined
+    let failures = 0
+    let unknowns = 0
+    const schedule = (delay: number, fn: () => void): void => {
+      timer = window.setTimeout(fn, delay)
+    }
+    const recoverFromAssets = async (): Promise<MediaItem[] | null> => {
+      try {
+        const response = await fetch('/comfyui/assets', { headers: { accept: 'application/json' } })
+        const data = (await response.json()) as { ok?: boolean; assets?: Array<{ promptId: string; media?: MediaItem[] }> }
+        if (stopped || data.ok !== true || !Array.isArray(data.assets)) return null
+        const asset = data.assets.find((entry) => entry.promptId === promptId)
+        const media = asset?.media ?? []
+        return media.length > 0 ? media : null
+      } catch {
+        return null
+      }
+    }
     const poll = async (): Promise<void> => {
       try {
         const response = await fetch(`/comfyui/jobs/media?promptId=${encodeURIComponent(promptId)}`, { headers: { accept: 'application/json' } })
         const data = (await response.json()) as { ok?: boolean; status?: string; media?: MediaItem[]; error?: string }
         if (stopped) return
-        if (data.ok !== true || data.status === undefined) return
+        if (data.ok !== true || data.status === undefined) {
+          throw new Error(data.error ?? 'invalid jobs/media response')
+        }
+        failures = 0
         if (data.status === 'completed' || data.status === 'failed') {
           setResult({ status: data.status, media: data.media, error: data.error })
           return
         }
-        timer = window.setTimeout(() => { void poll() }, 3_000)
-      } catch {
-        timer = window.setTimeout(() => { void poll() }, 5_000)
+        if (data.status === 'unknown') {
+          // In neither history nor the queue: evicted (server restart /
+          // clear) or lost. A completed run is in the asset index, so try
+          // that before giving up.
+          unknowns += 1
+          const recovered = await recoverFromAssets()
+          if (stopped) return
+          if (recovered !== null) {
+            setResult({ status: 'completed', media: recovered, recovered: true })
+            return
+          }
+          if (unknowns > POLL_UNKNOWN_GRACE) {
+            setResult({ status: 'completed', media: [] })
+            return
+          }
+          schedule(3_000, () => { void poll() })
+          return
+        }
+        // queued / running: the job is alive, so the eviction grace restarts.
+        unknowns = 0
+        schedule(3_000, () => { void poll() })
+      } catch (error) {
+        if (stopped) return
+        failures += 1
+        if (failures > POLL_MAX_FAILURES) {
+          const message = error instanceof Error ? error.message : String(error)
+          setResult({ status: 'failed', error: t('cardPollStalled', { n: POLL_MAX_FAILURES, message }) })
+          return
+        }
+        schedule(Math.min(3_000 * failures, 30_000), () => { void poll() })
       }
     }
     void poll()
@@ -197,7 +255,7 @@ function BackgroundCard({ label, promptId, t }: {
       stopped = true
       if (timer !== undefined) window.clearTimeout(timer)
     }
-  }, [promptId])
+  }, [promptId, t])
 
   if (result !== null && (result.status === 'completed' || result.status === 'failed')) {
     const media = result.media ?? []
@@ -209,6 +267,9 @@ function BackgroundCard({ label, promptId, t }: {
           result.status === 'failed' ? t('cardFailed') : t('cardBackgroundDone')),
         h('span', { className: 'dsc-meta' }, `${label} · ${promptId}`),
       ),
+      result.status !== 'failed' && result.recovered === true
+        ? h('div', { className: 'dsc-meta' }, t('cardRecovered'))
+        : null,
       result.status === 'failed'
         ? h('div', { className: 'dsc-meta dsc-job-error' }, result.error ?? t('cardFailed'))
         : media.length > 0
