@@ -20,7 +20,7 @@
 >
 > | dsh-comfyui | 配对的 DeepSeek Harness | 说明 |
 > | --- | --- | --- |
-> | **0.5.x（最新，`latest` tag）** | **≥ 0.1.2**（含 0.1.5 / 0.1.6 / 0.1.7 预发布版） | 0.5.3 起兼容 dsh 0.1.7 的设置机制（设置页保存直接生效，无需重启） |
+> | **0.5.x（最新，`latest` tag）** | **≥ 0.1.2**（含 0.1.5 / 0.1.6 / 0.1.7 预发布版；**0.5.5 起亦支持 0.2.0-rc**） | 0.5.3 起兼容 dsh 0.1.7 的设置机制（设置页保存直接生效，无需重启）；0.5.5 起适配 0.1.7+/0.2.0 的 jobs owner 契约（后台任务修复）并放宽 peer |
 > | **0.3.x（beta 线，`beta` tag）** | **0.1.1** | 老版本 dsh 请留在 0.3.x 线 |
 >
 > 安装：`dsh plugin --profile web add dsh-comfyui`（装最新 0.5.x）/ `dsh plugin --profile web add dsh-comfyui@beta`（老宿主装 0.3.x）。
