@@ -197,6 +197,21 @@ interface JobsService {
       readOutput?(): string
     }
   }): string
+  /** dsh 0.1.7+: the jobs API switched its owner/caller contract from the
+   * live Agent handle to its SessionId, and `readAt` arrived with that switch. */
+  readAt?: (id: string, from: number, caller?: unknown) => unknown
+}
+
+/**
+ * The jobs owner value this host accepts. dsh 0.1.7 (and 0.2.0) resolve
+ * `spec.owner` as a SessionId — passing the Agent handle fails with
+ * `session "[object Object]" has no live agent`; 0.1.2–0.1.6 hosts still take
+ * the handle itself. `readAt` is the feature test for the new contract.
+ */
+function jobsOwner(jobs: JobsService, agent: unknown): unknown {
+  if (typeof jobs.readAt !== 'function') return agent
+  if (typeof agent === 'object' && agent !== null && 'id' in agent) return (agent as { id: string }).id
+  return agent
 }
 
 const TOOL_TIMEOUT_MS = 3_600_000
@@ -381,7 +396,7 @@ function runDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefinition {
         const jobId = jobs.start({
           kind: 'comfyui',
           label,
-          ...(exec.agent !== undefined ? { owner: exec.agent } : {}),
+          ...(exec.agent !== undefined ? { owner: jobsOwner(jobs, exec.agent) } : {}),
           run: () => {
             const startedAt = Date.now()
             const done = (async () => {
@@ -829,7 +844,7 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
         const jobId = jobs.start({
           kind: 'comfyui',
           label: saved.name,
-          ...(exec.agent !== undefined ? { owner: exec.agent } : {}),
+          ...(exec.agent !== undefined ? { owner: jobsOwner(jobs, exec.agent) } : {}),
           run: () => {
             const startedAt = Date.now()
             const done = (async () => {
