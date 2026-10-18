@@ -20,7 +20,7 @@
 >
 > | dsh-comfyui | 配对的 DeepSeek Harness | 说明 |
 > | --- | --- | --- |
-> | **0.5.x（最新，`latest` tag）** | **≥ 0.1.2**（含 0.1.5 / 0.1.6 / 0.1.7 预发布版） | 0.5.3 起兼容 dsh 0.1.7 的设置机制（设置页保存直接生效，无需重启） |
+> | **0.5.x（最新，`latest` tag）** | **≥ 0.1.2，< 0.3**（含 0.1.5 / 0.1.6 / 0.1.7 / 0.2.x 预发布版） | 0.5.3 起兼容 dsh 0.1.7 的设置机制（设置页保存直接生效，无需重启）；0.5.5 起兼容 dsh 0.2.x |
 > | **0.3.x（beta 线，`beta` tag）** | **0.1.1** | 老版本 dsh 请留在 0.3.x 线 |
 >
 > 安装：`dsh plugin --profile web add dsh-comfyui`（装最新 0.5.x）/ `dsh plugin --profile web add dsh-comfyui@beta`（老宿主装 0.3.x）。
@@ -31,17 +31,16 @@
 
 Agent 直接驱动 ComfyUI，无需手动操作画布：
 
-- `comfyui_run` —— 提交 API 格式工作流或内置模板（txt2img / img2img / video），返回生成媒体；`mode: "sync"` 等待结果，`mode: "async"` 后台任务（视频生成强烈建议）。
-- `comfyui_object_info` —— 列出服务器支持的节点定义，让 Agent 现场构造合法工作流。
-- `comfyui_workflow` —— 管理插件工作流库：`list`（含服务器地址、本机 ComfyUI 目录、加载区素材、每个工作流的参数清单）、`run`（按 id 运行 + 参数覆盖）、`skill`（按需读取某工作流的技能包）、`refresh`（重算参数快照）。
+- `comfyui_workflow` —— **主入口**：生成内容就先 `list` 挑库里的工作流，再 `run`（按 id 运行 + 参数覆盖，键名写错会被拒绝，未传的参数使用默认值）。`list` 还带服务器地址、本机 ComfyUI 目录、加载区素材和每个工作流的参数清单；`skill` 按需读取某工作流的技能包，`refresh` 重算参数快照。`mode: "sync"` 等待结果，`mode: "async"` 后台任务（视频/音频强烈建议）——提交后 Agent 直接结束本轮，完成时由宿主通知唤醒；生成完毕后统一由 Agent 把结果里的 Markdown 媒体引用贴进回复（同步、异步、PTC 模式一致），并用一句话说明生成了什么；视频/音频链接下方会自动出现内嵌播放器。
 - `comfyui_skill` —— 读写工作流技能包（`list` / `read` / `write` / `append` / `mkdir` / `rename` / `delete` / `enable` / `require`），Agent 可把踩坑经验写回技能包，跨会话复用。
+- `comfyui_object_info` + `comfyui_run` —— **次要**，只用于手写工作流（临时测试，或按本机环境新建工作流）：先用 `comfyui_object_info` 查节点与可用模型，再手写 API JSON，用 `comfyui_run` 运行测试。测通后可在面板「新建工作流」存进库。
 
 ### UI 面板
 
 右侧停靠面板，三个页签：
 
 - **工作流** —— 可运行工作流库（新建 / 编辑 / 运行 / 删除 / 导入 `.json`，标签分类 + 下拉筛选）；支持**预设导出 / 导入**：把选中的工作流（默认全选，带技能包的行有标注）连同参数与技能包打包成 `.zip` 预设包带走，导出完成后的回执显示实际打包的工作流名单、文件名、体积与警告；把预设包**拖进对话框**（或点选文件）即可整包分析、按需导入，技能包原样完整还原（上千文件的模板大包也没问题），始终创建为新工作流、不覆盖现有库；自动检测 ComfyUI 端保存的图工作流，支持**提取**为可运行工作流（画布含多个独立流程时可选整体 / 按分量 / 主流程）。
-- **资产** —— 所有生成结果，预览、下载、悬停可删除（同步清理 ComfyUI 输出目录里的文件）。
+- **资产** —— 所有生成结果（卡片显示工作流名与文件名），预览、下载、悬停可删除（同步清理 ComfyUI 输出目录里的文件）。
 - **队列** —— 实时队列 + 历史任务五态展示，支持删除 / 中断 / 重跑 / 清空 / 释放内存，插件提交的任务带进度条与预览。
 
 点击会话头部的「ComfyUI 面板」按钮时会自动探测后端与 ComfyUI 的连接：连不上时面板自动收起（按钮不高亮），页面顶部弹出提醒（含具体原因），提示启动本机 ComfyUI（确保后端能检测到端口）或到设置页检查远程服务器地址；连接正常时静默，仅在不通→恢复时短暂显示「连接正常」。
@@ -117,7 +116,6 @@ dsh plugin --profile desktop add dsh-comfyui
 
 - DeepSeek Harness（`web` / `desktop` profile）
 - 一个运行中的 [ComfyUI](https://github.com/comfystack/ComfyUI) 服务器（默认 `http://127.0.0.1:8188`）
-- `video` 模板需要 [ComfyUI-WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper) 与 Wan 2.1 模型
 
 ## License
 

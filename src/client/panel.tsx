@@ -3247,6 +3247,7 @@ function AssetThumb(props: { asset: AssetEntry; t: ComfyUIPanelProps['t']; onCli
     return h('div', { className: 'dsc-asset dsc-asset--empty', onClick: props.onClick },
       h('div', null, props.t('assetGone')),
       h('div', { className: 'dsc-meta' }, props.asset.workflowName ?? '—'),
+      first !== undefined ? h('div', { className: 'dsc-meta dsc-asset-file', title: first.filename }, first.filename) : null,
       trash,
     )
   }
@@ -3288,6 +3289,7 @@ function AssetThumb(props: { asset: AssetEntry; t: ComfyUIPanelProps['t']; onCli
             h('span', { className: 'dsc-asset-audio-icon-name', title: first.filename }, first.filename))
         : h('img', { src: first.url, alt: first.filename, loading: 'lazy', onError: () => setBroken(true) }),
     h('div', { className: 'dsc-asset-meta' }, props.asset.workflowName ?? '—'),
+    h('div', { className: 'dsc-asset-meta dsc-asset-file', title: first.filename }, first.filename),
     trash,
   )
 }

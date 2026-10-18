@@ -1,0 +1,42 @@
+# Typecheck, build and the offline self-tests on every push to master and on
+# pull requests — external contributions (e.g. #18) get a verdict without a
+# maintainer running anything, and test-host-compat keeps the older dsh host
+# lines from silently breaking. No network services are needed: every test
+# stubs ComfyUI and the host.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['22.19', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      # `prepare` builds lib/ and client/ as part of the install.
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm run build
+      - run: node scripts/test-host-compat.mjs
+      - run: node scripts/test-store-params.mjs
+      - run: node scripts/test-skillpack.mjs
+      - run: node scripts/test-transfer.mjs
+      - run: node scripts/test-convert.mjs
+      - run: npm pack --dry-run

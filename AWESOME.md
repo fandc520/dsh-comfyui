@@ -5,13 +5,13 @@
 ## 建议条目（英文）
 
 ```markdown
-- [dsh-comfyui](https://github.com/fandc520/dsh-comfyui) — Let the DeepSeek Harness agent smartly drive a local or remote ComfyUI to generate anything: agent tools (`comfyui_run`, `comfyui_object_info`, `comfyui_workflow`, `comfyui_skill`), workflow/asset/queue panel with graph extract (whole/per component/main flow), load-area media loader, per-workflow skill packs, SDXL & Wan 2.1 templates, a companion skill and a same-origin media proxy. `dsh plugin --profile web add dsh-comfyui` (web) / `dsh plugin --profile desktop add dsh-comfyui` (desktop)
+- [dsh-comfyui](https://github.com/fandc520/dsh-comfyui) — Let the DeepSeek Harness agent smartly drive a local or remote ComfyUI to generate anything: agent tools (`comfyui_workflow`, `comfyui_skill`, plus `comfyui_object_info` / `comfyui_run` for hand-written workflows), workflow/asset/queue panel with graph extract (whole/per component/main flow), load-area media loader, per-workflow skill packs, a companion skill and a same-origin media proxy. `dsh plugin --profile web add dsh-comfyui` (web) / `dsh plugin --profile desktop add dsh-comfyui` (desktop)
 ```
 
 ## 建议条目（中文，如站点支持）
 
 ```markdown
-- [dsh-comfyui](https://github.com/fandc520/dsh-comfyui) — 让 DeepSeek Harness 的 Agent 智能驱动本地或远程 ComfyUI 生成任何内容：Agent 工具（`comfyui_run` / `comfyui_object_info` / `comfyui_workflow` / `comfyui_skill`）、工作流/资产/队列面板（图工作流提取：整体/按分量/主流程）、加载区媒体加载器、工作流技能包挂载、SDXL / Wan 2.1 模板、配套 skill 与同源媒体代理。`dsh plugin --profile web add dsh-comfyui`（web）/ `dsh plugin --profile desktop add dsh-comfyui`（desktop）
+- [dsh-comfyui](https://github.com/fandc520/dsh-comfyui) — 让 DeepSeek Harness 的 Agent 智能驱动本地或远程 ComfyUI 生成任何内容：Agent 工具（`comfyui_workflow` / `comfyui_skill`，以及用于手写工作流的 `comfyui_object_info` / `comfyui_run`）、工作流/资产/队列面板（图工作流提取：整体/按分量/主流程）、加载区媒体加载器、工作流技能包挂载、配套 skill 与同源媒体代理。`dsh plugin --profile web add dsh-comfyui`（web）/ `dsh plugin --profile desktop add dsh-comfyui`（desktop）
 ```
 
 ## 发布前核对清单
@@ -21,7 +21,7 @@
 - [x] 把仓库 URL 填进 package.json 的 `repository` 字段（已完成，`git+https://github.com/fandc520/dsh-comfyui.git`）
 - [ ] 按 awesome-dsh-plugin 仓库的贡献规范提交条目（通常是在其列表文件加一行 + PR）
 - [ ] 合并后 dshmarket 会在约一天内自动收录
-- [ ] 真实环境冒烟：启动 ComfyUI（默认 127.0.0.1:8188），在面板里对 ComfyUI 端保存的图点"提取"（验证多分量图的分量拆分）并运行提取出的执行流；再让 Agent 跑一次 txt2img，检查媒体卡片渲染与下载；视频模板需要 ComfyUI-WanVideoWrapper
+- [ ] 真实环境冒烟：启动 ComfyUI（默认 127.0.0.1:8188），在面板里对 ComfyUI 端保存的图点"提取"（验证多分量图的分量拆分）并运行提取出的执行流；再让 Agent 用 `comfyui_workflow` 跑一次库里的文生图工作流，检查媒体卡片渲染与下载
 
 ## dshmarket 收录说明
 

@@ -10,6 +10,7 @@ import { ComfyUISettings, type ComfyUISettingsProps } from './settings.tsx'
 import { ComfyUIPanel, type ComfyUIPanelProps } from './panel.tsx'
 import { ComfyUITrigger, type ComfyUITriggerProps } from './trigger.tsx'
 import { injectStyles } from './styles.ts'
+import { installInlineMedia } from './inline-media.ts'
 
 export const name = 'dsh-comfyui'
 export const inject = ['slots']
@@ -29,6 +30,7 @@ export function apply(ctx: ComfyUIClientContext): void {
   // the host locale, so zh/en switching works without a host change.
   const t = makeT(getLang())
   ctx.effect(() => injectStyles(), 'dsh-comfyui: styles')
+  ctx.effect(() => installInlineMedia(), 'dsh-comfyui: inline video/audio players')
 
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register(
     { name: 'tool.call.toolview', key: 'comfyui_run' },

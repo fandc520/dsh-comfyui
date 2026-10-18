@@ -20,7 +20,7 @@
 >
 > | dsh-comfyui | Paired DeepSeek Harness | Notes |
 > | --- | --- | --- |
-> | **0.5.x (latest, `latest` tag)** | **>= 0.1.2** (incl. 0.1.5 / 0.1.6 / 0.1.7 prereleases) | From 0.5.3 the settings page works with dsh 0.1.7's settings model (saves apply live, no restart) |
+> | **0.5.x (latest, `latest` tag)** | **>= 0.1.2, < 0.3** (incl. 0.1.5 / 0.1.6 / 0.1.7 / 0.2.x prereleases) | From 0.5.3 the settings page works with dsh 0.1.7's settings model (saves apply live, no restart); from 0.5.5 it supports dsh 0.2.x |
 > | **0.3.x (beta line, `beta` tag)** | **0.1.1** | On older dsh versions stay on the 0.3.x line |
 >
 > Install: `dsh plugin --profile web add dsh-comfyui` (latest 0.5.x) / `dsh plugin --profile web add dsh-comfyui@beta` (0.3.x for older hosts).
@@ -31,17 +31,16 @@
 
 The agent drives ComfyUI directly, no canvas work needed:
 
-- `comfyui_run` — submit an API-format workflow or a built-in template (`txt2img` / `img2img` / `video`) and get media back; `mode: "sync"` waits for the result, `mode: "async"` runs a background job (recommended for video).
-- `comfyui_object_info` — list the node definitions your ComfyUI server supports, so the agent can build valid workflows on the fly.
-- `comfyui_workflow` — manage the plugin's runnable-workflow library: `list` (server address, local ComfyUI dirs, load-area media, per-workflow parameter lists), `run` (by id + parameter overrides), `skill` (on-demand read of a workflow's skill pack), `refresh` (re-derive a parameter snapshot).
+- `comfyui_workflow` — **the main entry**: to generate, `list` the library and pick a workflow, then `run` it (by id + parameter overrides; misspelt keys are rejected, parameters not passed use their defaults). `list` also carries the server address, local ComfyUI dirs, load-area media and each workflow's parameter list; `skill` reads a workflow's skill pack on demand, `refresh` re-derives a parameter snapshot. `mode: "sync"` waits for the result, `mode: "async"` runs a background job (recommended for video/audio) — the agent ends its turn after submitting and is woken by the host on completion; once a run finishes, the agent pastes the ready-made Markdown media references from the result into its reply (the same for sync, async and PTC mode) with a one-sentence summary of what was generated; video/audio links get an inline player right below them.
 - `comfyui_skill` — read and write workflow skill packs (`list` / `read` / `write` / `append` / `mkdir` / `rename` / `delete` / `enable` / `require`); the agent can write its lessons back into a pack and reuse them across sessions.
+- `comfyui_object_info` + `comfyui_run` — **secondary**, for hand-written workflows only (temporary tests, or building a workflow for this environment): check the nodes and available models with `comfyui_object_info`, write the API JSON, run it with `comfyui_run`. Once it works, save it to the library with **New workflow** in the panel.
 
 ### UI panel
 
 A right-docked panel with three tabs:
 
 - **Workflows** — the runnable workflow library (create / edit / run / delete / import `.json`, tag classification with a dropdown filter); **preset export / import**: bundle selected workflows (all pre-selected; pack-bearing rows are annotated) with their parameters and skill packs into one `.zip` preset package — the completion notice reports what was actually packaged: workflow names, file name, size, and warnings; drag a preset package **onto the dialog** (or pick a file) to analyze it and import the selection, with skill packs restored byte-for-byte (thousand-file template packs included). Imports always create new workflows — nothing in the library is overwritten; auto-detects graphs saved on the ComfyUI server and can **extract** them into runnable workflows (whole / per component / main flow only when a canvas holds several independent flows).
-- **Assets** — every generated result with preview, download, and hover-to-delete (also removes the file from the ComfyUI output directory).
+- **Assets** — every generated result (cards show the workflow name and filename) with preview, download, and hover-to-delete (also removes the file from the ComfyUI output directory).
 - **Queue** — live queue plus full history in five states, with delete / interrupt / rerun / clear / free-memory actions; plugin-submitted jobs show a progress bar and preview.
 
 Clicking the "ComfyUI Panel" button in the session header probes the backend's connection to ComfyUI: when it cannot connect, the panel closes again (the button does not stay highlighted) and a toast at the top of the page explains why (with the concrete reason), asking you to start the local ComfyUI (so the backend can see its port) or check the remote server URL in settings; a healthy connection stays silent, with a brief "Connected" note only when it recovers from a failure.
@@ -117,7 +116,6 @@ For a remote ComfyUI behind an authenticated proxy, provide the key via credenti
 
 - DeepSeek Harness (`web` / `desktop` profile)
 - A running [ComfyUI](https://github.com/comfystack/ComfyUI) server (default `http://127.0.0.1:8188`)
-- The `video` template needs [ComfyUI-WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper) and Wan 2.1 models
 
 ## License
 

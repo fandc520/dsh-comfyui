@@ -9,3 +9,7 @@ DEVELOPMENT.md
 # 本机工具产物（codegraph 索引、meow-memory 记忆库），不入库
 .codegraph/
 .dsh-meow/
+# macOS 目录元数据
+.DS_Store
+# npm pack 产物（装机验收用的本地 tarball）
+/*.tgz

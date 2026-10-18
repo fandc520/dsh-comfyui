@@ -8,10 +8,31 @@ export const COMFYUI_SKILL = {
   name: 'dsh-comfyui-workflows',
   source: 'runtime',
   description:
-    'ComfyUI 工作流管理：区分“图工作流”（ComfyUI 端保存的画布，衍生主题）与“API 工作流”（可执行，运行主题），分析画布中的多个独立流程（连通分量），以及图→API 提取的规则与面板操作引导。也包含本机环境（用户 ComfyUI 目录）与 TTS-Audio-Suite 音色库的快速查询/快照刷新方案。处理 comfyui_workflow、需要定位用户 ComfyUI 文件/音色库，或用户要求运行 ComfyUI 端保存的工作流时加载。',
+    '用 ComfyUI 生成图片/视频/音频（文生图、图生图、文生视频、语音等）的入口：第一步用 comfyui_workflow list 挑库里的工作流再 run。也负责工作流管理：区分“图工作流”（ComfyUI 端保存的画布，衍生主题）与“API 工作流”（可执行，运行主题），分析画布中的多个独立流程（连通分量），以及图→API 提取的规则与面板操作引导。也包含本机环境（用户 ComfyUI 目录）与 TTS-Audio-Suite 音色库的快速查询/快照刷新方案。处理 comfyui_workflow、需要定位用户 ComfyUI 文件/音色库，或用户要求运行 ComfyUI 端保存的工作流时加载。',
   whenToUse:
-    '用户要求运行/管理 ComfyUI 中保存的工作流，或 comfyui_workflow list 显示未提取的图工作流时；需要判断一个画布是否包含多个独立流程、或解释为何某个工作流无法直接运行时；需要查询 TTS-Audio-Suite 音色库、刷新已存工作流的音色参数快照、或定位用户本机 ComfyUI 目录时；或 comfyui_workflow list 里某个工作流带“技能包”标记、需要在运行前读取它时。',
+    '用户要用 ComfyUI 生成任何内容时（先 list 再 run）；用户要求运行/管理 ComfyUI 中保存的工作流，或 comfyui_workflow list 显示未提取的图工作流时；需要判断一个画布是否包含多个独立流程、或解释为何某个工作流无法直接运行时；需要查询 TTS-Audio-Suite 音色库、刷新已存工作流的音色参数快照、或定位用户本机 ComfyUI 目录时；或 comfyui_workflow list 里某个工作流带“技能包”标记、需要在运行前读取它时。',
   content: `# dsh-comfyui 工作流管理
+
+## 生成内容：第一步永远是 comfyui_workflow list
+
+用户要生成任何内容（图片、视频、音频，文生图、图生图、TTS 等）时：
+
+1. **先调用 \`comfyui_workflow action: list\`**，按名称、描述、标签挑出合适的工作流。库里的工作流是用户为这台服务器配好的，模型和节点都可用。
+2. 有技能包的先 \`action: skill { id }\` 读一遍，然后 \`comfyui_workflow run { id, parameters }\`（细节见「运行工作流的正确流程」）。
+3. \`comfyui_object_info\` 和 \`comfyui_run\` **不是生成入口**，只用于手写工作流（见下一节）。库里有合适的工作流就不要用它们。
+4. 能直接调用工具就直接调用（对话里才会显示生成卡片）；当前环境只能在 run_code 里调用时也可以，照返回值里的 \`report\` 字段做。
+
+## 手写工作流（次要：临时测试，或按本机环境新建工作流）
+
+库里没有合适的工作流、需要临时测试，或要为本机环境新建一个工作流时才用，步骤固定：
+
+1. **查环境**：\`comfyui_object_info { filter }\` 查节点类名、输入项和加载器里实际可选的模型文件名（如 \`filter: "Loader"\`）。
+2. **手写 API JSON**：节点 id → \`{ class_type, inputs }\`，连线写成 \`["节点id字符串", 输出槽位]\`，模型名只用第 1 步查到的。
+3. **运行测试**：\`comfyui_run { workflow }\`，报错就按错误信息改 JSON 再跑。
+
+测通后如果要长期用，告诉用户在面板里「新建工作流」粘贴这份 JSON 存进库，之后走 list → run。
+
+## 两个工作流主题
 
 本插件把 ComfyUI 工作流分成两个主题：
 
@@ -145,7 +166,10 @@ TTS-Audio-Suite（\`{comfyuiDir}/custom_nodes/tts_audio_suite\`）的"🎭 Chara
 2. **有技能包就先读**：list 里某个工作流带 \`技能包:\` 那一行，说明用户为它写了专属说明书（适用场景、参数怎么填、哪些环节会翻车）。选中它之后、运行之前，先 \`comfyui_workflow action: skill { id }\` 把正文读进来并照着做。标注「运行前必读」的，不读会被 run 直接拒绝。没有这行的工作流跳过本步。
 3. **参数决策**：只依据清单里的参数（键名用英文名），选择/覆盖适合的值——**不需要查看工作流内部结构**。
 4. **run 直接调用**：\`comfyui_workflow run { id, parameters: {...} }\`。插件直接从库里取该工作流的 JSON 提交给 ComfyUI，你**只传参数覆盖值，绝不自己输出或复制完整工作流 JSON**（那会浪费大量 token）。
-   - **视频/音频工作流一律 \`mode: "async"\`**：生成要几分钟，sync 会等待超时中断（报 generation aborted）。async 立即返回 job id，**启动后不要阻塞等待**（不要对返回的 job 用 wait: true 卡住），继续做其他事，后台任务完成时系统会通知你，到时再用 job_output（不 wait）收集结果和媒体回显。
+   - **参数**：键名与 list 完全一致（写错会被拒绝）；未传的参数使用默认值。提示词类参数按用户需求填写，未明确时据需求自行发挥。
+   - **视频/音频工作流一律 \`mode: "async"\`**：生成要几分钟，sync 会等待超时中断（报 generation aborted）。async 立即返回 job id，**启动后不要阻塞等待**（不要对返回的 job 用 wait: true 卡住，也不要 sleep/轮询）：告诉用户正在生成，**直接结束本轮回复**；有其他独立的事可以先做完再结束。后台任务完成时系统会发通知唤醒你，到时调用一次 job_output（不 wait）收集结果。
+   - **结果就是最终结果，地址已经带好**：不要再查状态，也不要去查资产、history 或拼接 URL。
+   - **生成完毕后的统一做法**（sync、async 的 job_output、run_code 都一样）：用一句话告诉用户生成了什么（依据结果里的「Prompt used」），然后把结果给出的 Markdown 行**原样贴进回复**（图片是 \`![image 1](url)\`，视频/音频是链接）——这是用户看到结果的地方。
    - 图片生成可 sync（通常 <1 分钟）；若不确定输出类型，也用 async。
 - \`action: get\` 只在**诊断/检查**工作流内容时使用（它会输出完整 JSON、占用大量 token），它**不是运行路径**。
 

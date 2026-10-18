@@ -1,9 +1,14 @@
 // Client bundle for dsh-comfyui: emits the __ModuleLoader__.load factory the
-// dsh web plugin table serves at /plugins/dsh-comfyui/client.js. Externals are
-// exactly the loader module-table platform entries; everything else inlines.
+// dsh web plugin table serves at /plugins/<package-name>/client.js. Externals
+// are exactly the loader module-table platform entries; everything else inlines.
+import { createRequire } from 'node:module'
 import { defineConfig } from 'tsdown'
 
-const ID = 'dsh-comfyui'
+// The banner id is the factory registration the renderer's module graph looks
+// up BY PACKAGE NAME (graph-row id). A stale literal here makes the row fall
+// back to its one-resource URL, re-execute the bundle and abort web boot with
+// `client-modules: duplicate factory registration` (contract 16).
+const ID = createRequire(import.meta.url)('./package.json').name
 
 const PLATFORM_EXTERNALS = [
   'react',

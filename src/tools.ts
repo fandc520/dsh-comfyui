@@ -1,14 +1,15 @@
 /**
  * Model-facing tools for dsh-comfyui, registered into the host `tools`
- * registry. `comfyui_run` submits a workflow and returns media results
- * (synchronously or as a background job); `comfyui_object_info` exposes the
- * server's node definitions; `comfyui_workflow` lists and runs saved
- * workflows from the panel-managed workflow library.
+ * registry. The main entry is `comfyui_workflow`: list and run saved
+ * workflows from the panel-managed library (synchronously or as a background
+ * job); `comfyui_skill` maintains their skill packs. Secondary, for
+ * hand-written workflows only (temporary tests, building a workflow for this
+ * environment): `comfyui_object_info` exposes the server's node definitions
+ * and `comfyui_run` submits a hand-written API workflow.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Config } from './config.js'
 import { ComfyUIClient, collectMedia } from './comfyui.js'
-import { TEMPLATES, findTemplate, cloneWorkflow, applyTemplateInputs } from './templates.js'
 import type { AssetRecord, LoadSlot, StoredWorkflow } from './store.js'
 import type { GraphAnalysis } from './analyze.js'
 import type { RunProgress } from './progress.js'
@@ -114,6 +115,10 @@ export interface ComfyUIRuntime {
 interface ToolRunContext {
   agent?: unknown
   signal: AbortSignal
+  callId?: string
+  rootCallId?: string
+  /** Set when another tool (run_code / programmatic tool calling) dispatched this call. */
+  parent?: unknown
 }
 
 /**
@@ -162,6 +167,18 @@ export interface RunResult {
   elapsedMs: number
   media: RunMediaItem[]
   summary: string
+  /** Saved-workflow runs: the prompt-type parameters as actually submitted. */
+  prompts?: PromptUsed[]
+  /** The model-facing text (`runResultText`), carried in the value for code-dispatched calls. */
+  report?: string
+}
+
+/** One prompt-type parameter of a saved-workflow run, as actually submitted. */
+export interface PromptUsed {
+  name: string
+  text: string
+  /** false = the caller did not pass it, so the saved default was used. */
+  passed: boolean
 }
 
 /** Background mode result: collect later with job_output. */
@@ -170,6 +187,10 @@ export interface BackgroundResult {
   jobId: string
   promptId: string
   label: string
+  /** The host posts a completion notice (and wakes an idle agent) — dsh 0.1.7+ jobs. */
+  notifies: boolean
+  /** The model-facing receipt (`backgroundText`), carried in the value for code-dispatched calls. */
+  report?: string
 }
 
 /** A minimal ToolDefinition for ctx.tools.register. */
@@ -186,61 +207,172 @@ interface ToolDefinition {
   execute(args: Record<string, unknown>, exec: ToolRunContext): Promise<unknown>
 }
 
+/**
+ * The jobs service spans two contracts, and `engines.dsh` admits both:
+ * - dsh 0.1.2–0.1.6: `owner` is the Agent handle; the job_output text is the
+ *   outcome's `output`.
+ * - dsh 0.1.7+ (0.2.x included): `owner` is the SessionId the registry looks
+ *   up (`agents.get(sessionId)` — an Agent object fails every async start with
+ *   `session "[object Object]" has no live agent`); the text is `result`.
+ * `readAt` arrived with that switch, so it is the feature test (`sessionJobs`).
+ */
 interface JobsService {
   start(spec: {
     kind: string
     label: string
     owner?: unknown
-    run(): {
+    /** 0.1.7+ hands the job handle in; older hosts call `run()` bare. */
+    run(job?: JobHandle): {
       cancel(reason?: string): void
-      done: Promise<{ status: 'completed' | 'killed' | 'failed'; detail?: string; output?: string }>
-      readOutput?(): string
+      done: Promise<JobOutcome>
     }
   }): string
+  readAt?: unknown
+}
+
+/** The 0.1.7+ job handle — only its status-line progress is used here. */
+interface JobHandle {
+  updateProgress?(line: string): void
+}
+
+type JobOutcome =
+  | { status: 'completed' | 'killed' | 'failed'; detail?: string; result?: string }
+  | { status: 'completed' | 'killed' | 'failed'; detail?: string; output?: string }
+
+function sessionJobs(jobs: JobsService): boolean {
+  return typeof jobs.readAt === 'function'
+}
+
+/** The job owner for a tool call, in the shape this host's registry resolves. */
+function jobOwner(jobs: JobsService, agent: unknown): { owner?: unknown } {
+  if (agent === undefined) return {}
+  if (!sessionJobs(jobs)) return { owner: agent }
+  const id = typeof agent === 'object' && agent !== null ? (agent as { id?: unknown }).id : undefined
+  return typeof id === 'string' && id !== '' ? { owner: id } : {}
+}
+
+/** A completed job: `text` is what the model's next job_output receives. */
+function jobCompleted(jobs: JobsService, text: string): JobOutcome {
+  return sessionJobs(jobs) ? { status: 'completed', result: text } : { status: 'completed', output: text }
+}
+
+/**
+ * A failed job. 0.1.7+ shows `detail` as the status-line reason, so the
+ * message goes there; older hosts hand `output` to job_output instead.
+ */
+function jobFailed(jobs: JobsService, message: string): JobOutcome {
+  return sessionJobs(jobs)
+    ? { status: 'failed', detail: `comfyui: ${message}` }
+    : { status: 'failed', detail: 'comfyui', output: message }
+}
+
+/** The job status line for one prompt: sampler progress once the WebSocket reports any. */
+function progressLine(progress: RunProgress | undefined): string {
+  if (progress === undefined || progress.max <= 0) return 'waiting for ComfyUI'
+  const node = progress.node !== null ? ` (node ${progress.node})` : ''
+  return `step ${progress.value}/${progress.max}${node}`
+}
+
+/**
+ * Run one queued prompt as a background job — the shared async path of
+ * `comfyui_run` and `comfyui_workflow run`.
+ * - Cancel (job_kill) aborts the wait, which cancels THIS prompt only
+ *   (`cancelPrompt`: dequeue while pending, interrupt while running) and
+ *   settles the job as killed. A bare `interrupt()` here used to stop
+ *   whatever ComfyUI was running, i.e. someone else's job when this one was
+ *   still queued.
+ * - On 0.1.7+ hosts the status line carries live sampler progress (from the
+ *   ProgressTracker, pulled once per history poll — no extra timer), so
+ *   job_list shows the job moving instead of inviting a status poll.
+ */
+function startPromptJob(
+  jobs: JobsService,
+  runtime: ComfyUIRuntime,
+  client: ComfyUIClient,
+  opts: { promptId: string; label: string; subject: string; waitMs: number; agent: unknown; prompts?: PromptUsed[] },
+): string {
+  const { promptId, label, subject, waitMs } = opts
+  const config = runtime.getConfig()
+  return jobs.start({
+    kind: 'comfyui',
+    label,
+    ...jobOwner(jobs, opts.agent),
+    run: (job) => {
+      const startedAt = Date.now()
+      const controller = new AbortController()
+      let lastLine: string | undefined
+      const publishProgress = (): void => {
+        if (job?.updateProgress === undefined) return
+        const line = progressLine(runtime.queueProgress(promptId))
+        if (line === lastLine) return
+        lastLine = line
+        job.updateProgress(line)
+      }
+      const done = (async (): Promise<JobOutcome> => {
+        try {
+          const entry = await client.waitForCompletion({
+            promptId,
+            timeoutMs: waitMs,
+            pollIntervalMs: config.pollIntervalMs,
+            signal: controller.signal,
+            onPoll: publishProgress,
+          })
+          const items = collectMedia({ promptId, entry, maxItems: config.maxMediaItems, proxyBase: runtime.proxyBase() })
+          const result: RunResult = {
+            kind: 'sync',
+            promptId,
+            status: 'completed',
+            elapsedMs: Date.now() - startedAt,
+            media: items,
+            summary: summarizeMedia(items),
+            ...(opts.prompts !== undefined && opts.prompts.length > 0 ? { prompts: opts.prompts } : {}),
+          }
+          return jobCompleted(jobs, runResultText(subject, result))
+        } catch (error) {
+          runtime.untrack(promptId)
+          if (controller.signal.aborted) return { status: 'killed', detail: 'comfyui: cancelled' }
+          const message = error instanceof Error ? error.message : String(error)
+          return jobFailed(jobs, message)
+        }
+      })()
+      return {
+        cancel: () => controller.abort(),
+        done,
+      }
+    },
+  })
 }
 
 const TOOL_TIMEOUT_MS = 3_600_000
 
-function missing(args: Record<string, unknown>, name: string): boolean {
-  return args[name] === undefined || args[name] === null
-}
-
-function requireOneOf(args: Record<string, unknown>, names: readonly string[]): string | undefined {
-  const present = names.filter((name) => !missing(args, name))
-  if (present.length === 0) return `exactly one of ${names.join(', ')} is required`
-  if (present.length > 1) return `only one of ${names.join(', ')} may be given`
-  return undefined
-}
-
+/**
+ * The hand-written API workflow `comfyui_run` submits, with optional per-node
+ * input overrides merged in. The built-in templates are gone: they named
+ * stock checkpoints most servers do not have, and "文生图" matched `txt2img`
+ * before the agent ever looked at the library (real session, 0.5.5 round) —
+ * a leftover `template` argument gets a pointer to the right entry point.
+ */
 function buildWorkflow(args: Record<string, unknown>): { workflow: Record<string, { class_type: string; inputs: Record<string, unknown> }>; label: string } {
-  const template = args.template
-  if (typeof template === 'string') {
-    const found = findTemplate(template)
-    if (found === undefined) {
-      throw new Error(`comfyui_run: unknown template "${template}" — use one of ${TEMPLATES.map((t) => t.id).join(', ')}`)
-    }
-    const workflow = cloneWorkflow(found.workflow)
-    const inputs = args.inputs
-    if (inputs !== undefined) {
-      if (typeof inputs !== 'object' || inputs === null) {
-        throw new Error('comfyui_run: inputs must be an object keyed by node id')
-      }
-      applyTemplateInputs(workflow, inputs as Record<string, Record<string, unknown>>)
-    }
-    return { workflow, label: `comfyui ${template}` }
+  if (args.template !== undefined) {
+    throw new Error('comfyui_run: built-in templates were removed — to generate, use comfyui_workflow (action: list, then run); comfyui_run only takes a hand-written `workflow`')
   }
   const workflow = args.workflow
-  if (typeof workflow !== 'object' || workflow === null) {
-    throw new Error('comfyui_run: workflow must be an object')
+  if (typeof workflow !== 'object' || workflow === null || Array.isArray(workflow)) {
+    throw new Error('comfyui_run: `workflow` (a hand-written API-format object: node id → { class_type, inputs }) is required')
   }
+  const nodes = workflow as Record<string, { class_type: string; inputs: Record<string, unknown> }>
   const inputs = args.inputs
   if (inputs !== undefined) {
     if (typeof inputs !== 'object' || inputs === null) {
       throw new Error('comfyui_run: inputs must be an object keyed by node id')
     }
-    applyTemplateInputs(workflow as Record<string, { class_type: string; inputs: Record<string, unknown> }>, inputs as Record<string, Record<string, unknown>>)
+    for (const [nodeId, partial] of Object.entries(inputs as Record<string, unknown>)) {
+      const node = nodes[nodeId]
+      if (node === undefined || typeof partial !== 'object' || partial === null) continue
+      node.inputs = { ...node.inputs, ...(partial as Record<string, unknown>) }
+    }
   }
-  return { workflow: workflow as Record<string, { class_type: string; inputs: Record<string, unknown> }>, label: 'comfyui custom workflow' }
+  return { workflow: nodes, label: 'comfyui custom workflow' }
 }
 
 function summarizeMedia(media: RunMediaItem[]): string {
@@ -257,21 +389,95 @@ function summarizeMedia(media: RunMediaItem[]): string {
   return parts.join(', ')
 }
 
+/** One ready-to-paste Markdown reference: images embed, other media link. */
+function mediaMarkdown(item: RunMediaItem, n: number): string {
+  return item.kind === 'image' ? `![image ${n}](${item.url})` : `[${item.kind} ${n}: ${item.filename}](${item.url})`
+}
+
+/**
+ * The prompt-type parameters of a saved-workflow run as they will be
+ * submitted: auto-detected prompts (`prompt`, `prompt_2`, …, label 提示词)
+ * and any string parameter whose name or label says prompt. `passed: false`
+ * marks a value the caller left to the saved default.
+ */
+/**
+ * A parameter's prompt role: 'write' = the positive prompt the model must
+ * compose from the user's request every run; 'negative' = a negative prompt
+ * (its default is normally fine); undefined = not a prompt. Prompts are the
+ * auto-detected `prompt`, `prompt_2`, … (label 提示词) or any string parameter
+ * whose name or label says prompt.
+ */
+function promptRole(param: { name: string; label?: string; type?: string; upload?: string }): 'write' | 'negative' | undefined {
+  if (param.type !== 'string' || param.upload !== undefined) return undefined
+  const label = param.label ?? ''
+  if (!/prompt/i.test(param.name) && !/提示/.test(label)) return undefined
+  return /negative|neg_|负面|反向/i.test(`${param.name} ${label}`) ? 'negative' : 'write'
+}
+
+function promptsUsed(parameters: WorkflowParameter[], values: Record<string, unknown>): PromptUsed[] {
+  const used: PromptUsed[] = []
+  for (const param of parameters) {
+    if (promptRole(param) === undefined) continue
+    const passed = Object.prototype.hasOwnProperty.call(values, param.name)
+    const value = passed ? values[param.name] : param.default
+    if (typeof value !== 'string' || value === '') continue
+    used.push({ name: param.name, text: value, passed })
+  }
+  return used
+}
+
+/**
+ * The model-facing account of a finished run — the sync result, the async
+ * job_output text and the `report` a run_code caller reads alike. It says the
+ * result is final (models re-check status and re-query assets for URLs they
+ * already hold), names the prompt actually submitted, and hands over the media
+ * as Markdown lines to paste: the model's reply is the one place every host
+ * mode shows (dsh 0.2 collapses finished tool rows, and run_code / PTC mode
+ * renders no tool card at all), so it is the display path, always. Headless
+ * hosts (no web server) only have bare filenames, which stay a plain list.
+ */
+function runResultText(subject: string, result: RunResult): string {
+  const final = result.status === 'completed' ? ' This is the final result — there is no status to check and no address to look up.' : ''
+  const lines = [`${subject} ${result.status} (prompt ${result.promptId}) in ${result.elapsedMs} ms — ${summarizeMedia(result.media)}.${final}`]
+  // The prompt as submitted — so the report names the real subject, and a run
+  // that silently used the saved default (no parameter passed) is visible.
+  for (const used of result.prompts ?? []) {
+    const text = used.text.length > 300 ? `${used.text.slice(0, 300)}…` : used.text
+    lines.push(used.passed
+      ? `Prompt used (${used.name}): "${text}"`
+      : `Prompt used (${used.name}, default — not passed): "${text}"`)
+  }
+  const linkable = result.media.filter((item) => item.url !== item.filename)
+  const theme = 'In your reply, state in one sentence what was generated (its subject, per the prompt used).'
+  if (linkable.length > 0) {
+    lines.push(`${theme} Show the results by pasting these Markdown lines into your reply as-is. The URLs are final — do not look them up again:`)
+    linkable.forEach((item, i) => lines.push(mediaMarkdown(item, i + 1)))
+  } else if (result.status === 'completed') {
+    lines.push(theme)
+  }
+  for (const item of result.media) {
+    if (item.url === item.filename) lines.push(`  ${item.kind}: ${item.filename}`)
+  }
+  return lines.join('\n')
+}
+
+/**
+ * The model-facing receipt for a started background job. Models tend to block
+ * on it (job_output wait, sleeps) or poll; where the host posts a completion
+ * notice, the right move is to end the turn — the notice wakes the agent.
+ */
+function backgroundText(subject: string, result: BackgroundResult): string {
+  const head = `${subject} started in the background (job ${result.jobId}, prompt ${result.promptId}).`
+  const collect = 'call job_output once (no wait) — its result already contains ready-to-paste Markdown for the media.'
+  return result.notifies
+    ? `${head} Do not wait, poll or call job_output now: tell the user it is generating and end your turn. You will get a completion notice in this session when it finishes; then ${collect}`
+    : `${head} Do not block on it: continue with other work or end your turn. To collect it later, ${collect}`
+}
+
 function renderRunResult(_args: unknown, value: unknown): unknown[] {
   const result = value as RunResult | BackgroundResult
-  if (result.kind === 'background') {
-    return [{
-      type: 'text',
-      text: `ComfyUI generation started in the background (job ${result.jobId}, prompt ${result.promptId}). Collect the result with job_output.`,
-    }]
-  }
-  const lines = [
-    `ComfyUI ${result.status} (prompt ${result.promptId}) in ${result.elapsedMs} ms — ${summarizeMedia(result.media)}`,
-  ]
-  for (const item of result.media) {
-    lines.push(`  ${item.kind}: ${item.url}`)
-  }
-  return [{ type: 'text', text: lines.join('\n') }]
+  if (result.kind === 'background') return [{ type: 'text', text: backgroundText('ComfyUI generation', result) }]
+  return [{ type: 'text', text: runResultText('ComfyUI', result) }]
 }
 
 /**
@@ -285,9 +491,11 @@ async function waitSync(
   promptId: string,
   config: Config,
   signal: AbortSignal,
-  timeoutMs?: number,
+  timeoutMs: number | undefined,
+  context: { prompts?: PromptUsed[] },
 ): Promise<RunResult> {
   const startedAt = Date.now()
+  const prompts = context.prompts !== undefined && context.prompts.length > 0 ? { prompts: context.prompts } : {}
   try {
     const entry = await client.waitForCompletion({
       promptId,
@@ -296,13 +504,15 @@ async function waitSync(
       signal,
     })
     const items = collectMedia({ promptId, entry, maxItems: config.maxMediaItems, proxyBase: runtime.proxyBase() })
+    const elapsedMs = Date.now() - startedAt
     return {
       kind: 'sync',
       promptId,
       status: 'completed',
-      elapsedMs: Date.now() - startedAt,
+      elapsedMs,
       media: items,
       summary: summarizeMedia(items),
+      ...prompts,
     }
   } catch (error) {
     runtime.untrack(promptId)
@@ -324,23 +534,20 @@ function runDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefinition {
   return {
     name: 'comfyui_run',
     description: [
-      'Submit a workflow to the configured ComfyUI server and return the generated media (images/videos).',
-      'Provide exactly one of `workflow` (ComfyUI API-format object: node id → { class_type, inputs }) or `template` (built-in: txt2img | img2img | video).',
-      'Use `inputs` to override node inputs by id, e.g. {"6": {"text": "a red cat"}} for the positive prompt in the templates.',
-      'Templates: txt2img — 4 checkpoint, 5 EmptyLatentImage (width/height), 6 positive text, 7 negative text, 3 KSampler (seed/steps/cfg/denoise), 9 SaveImage. img2img — 10 LoadImage (image), 11 VAEEncode, 6 text, 3 KSampler (denoise). video — Wan 2.1, needs ComfyUI-WanVideoWrapper custom nodes (10 UNETLoader, 13 WanTextEncode, 14 WanImageToVideo, 15 KSampler, 17 SaveVideo).',
-      'Inspect available node types with comfyui_object_info before hand-writing a workflow.',
-      '`mode: sync` (default) waits and returns media URLs; `mode: async` starts a background job and returns a job id for job_output.',
+      'SECONDARY tool — not the way to generate. To generate, use comfyui_workflow (action: list, then run a saved workflow).',
+      'comfyui_run only submits a HAND-WRITTEN ComfyUI API workflow (node id → { class_type, inputs }), for a temporary test or for building a new workflow for this environment: first check the server with comfyui_object_info (node classes, inputs, available model names), then write the JSON, then run it here.',
+      '`inputs` overrides node inputs by id, e.g. {"3": {"seed": 42}}.',
+      '`mode: sync` (default) waits and returns media URLs; `mode: async` starts a background job and returns a job id at once — then end your turn instead of waiting; a completion notice brings you back, and job_output returns the media as ready-to-paste Markdown. Results are final and carry the media URLs — never re-check status or look addresses up; paste the Markdown lines the result gives into your reply to show the media.',
     ].join(' '),
     parameters: {
       type: 'object',
       properties: {
-        workflow: { type: 'object', description: 'ComfyUI API-format workflow: node id → { class_type, inputs }. Alternative to `template`.' },
-        template: { type: 'string', enum: ['txt2img', 'img2img', 'video'], description: 'Built-in workflow template id. Alternative to `workflow`.' },
-        inputs: { type: 'object', description: 'Per-node input overrides keyed by node id, e.g. {"3": {"seed": 42, "steps": 30}, "6": {"text": "prompt"}}.' },
-        mode: { type: 'string', enum: ['sync', 'async'], default: 'sync', description: 'sync waits and returns media; async returns a background job id.' },
+        workflow: { type: 'object', description: 'Hand-written ComfyUI API-format workflow: node id → { class_type, inputs }; node references are ["<node id string>", <output slot>].' },
+        inputs: { type: 'object', description: 'Optional per-node input overrides keyed by node id, e.g. {"3": {"seed": 42, "steps": 30}}.' },
+        mode: { type: 'string', enum: ['sync', 'async'], default: 'sync', description: 'sync waits and returns media; async returns a background job id immediately (end your turn after it).' },
         timeout_ms: { type: 'number', minimum: 5_000, maximum: 3_600_000, description: 'Generation wait budget in ms (default 180000). Video needs minutes.' },
       },
-      required: [],
+      required: ['workflow'],
     },
     output: {
       schema: { type: 'object' },
@@ -362,8 +569,6 @@ function runDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefinition {
     },
     timeoutMs: TOOL_TIMEOUT_MS,
     async execute(args, exec) {
-      const problem = requireOneOf(args, ['workflow', 'template'])
-      if (problem !== undefined) throw new Error(`comfyui_run: ${problem}`)
       const mode = args.mode === undefined ? 'sync' : args.mode
       if (mode !== 'sync' && mode !== 'async') throw new Error(`comfyui_run: mode must be sync or async, got ${String(mode)}`)
       const config = runtime.getConfig()
@@ -378,48 +583,13 @@ function runDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefinition {
         if (jobs === undefined) {
           throw new Error('comfyui_run: background jobs unavailable — load @deepseek-ai/dsh-jobs-local and @deepseek-ai/dsh-tool-jobs')
         }
-        const jobId = jobs.start({
-          kind: 'comfyui',
-          label,
-          ...(exec.agent !== undefined ? { owner: exec.agent } : {}),
-          run: () => {
-            const startedAt = Date.now()
-            const done = (async () => {
-              try {
-                const entry = await client.waitForCompletion({
-                  promptId,
-                  timeoutMs: waitMs,
-                  pollIntervalMs: config.pollIntervalMs,
-                  signal: new AbortController().signal,
-                })
-                const items = collectMedia({ promptId, entry, maxItems: config.maxMediaItems, proxyBase: runtime.proxyBase() })
-                const result: RunResult = {
-                  kind: 'sync',
-                  promptId,
-                  status: 'completed',
-                  elapsedMs: Date.now() - startedAt,
-                  media: items,
-                  summary: summarizeMedia(items),
-                }
-                return { status: 'completed' as const, output: JSON.stringify(result) }
-              } catch (error) {
-                runtime.untrack(promptId)
-                const message = error instanceof Error ? error.message : String(error)
-                return { status: 'failed' as const, detail: 'comfyui', output: message }
-              }
-            })()
-            return {
-              cancel: () => { void client.interrupt().catch(() => undefined) },
-              done,
-            }
-          },
-        })
-        const result: BackgroundResult = { kind: 'background', jobId, promptId, label }
-        return result
+        const jobId = startPromptJob(jobs, runtime, client, { promptId, label, subject: 'ComfyUI', waitMs, agent: exec.agent })
+        const result: BackgroundResult = { kind: 'background', jobId, promptId, label, notifies: sessionJobs(jobs) }
+        return { ...result, report: backgroundText('ComfyUI generation', result) }
       }
 
-      const result = await waitSync(runtime, client, promptId, config, exec.signal, waitMs)
-      return result
+      const result = await waitSync(runtime, client, promptId, config, exec.signal, waitMs, {})
+      return { ...result, report: runResultText('ComfyUI', result) }
     },
   }
 }
@@ -457,7 +627,7 @@ function summarizeFields(fields: Record<string, unknown> | undefined, required: 
 function objectInfoDefinition(runtime: ComfyUIRuntime): ToolDefinition {
   return {
     name: 'comfyui_object_info',
-    description: 'List the node definitions the configured ComfyUI server supports (class types, required and optional inputs). Use it to build valid API-format workflows for comfyui_run. Optional `filter` narrows by class-name substring, e.g. "KSampler", "VAE", "LoadImage".',
+    description: 'SECONDARY tool, for hand-writing workflows only (with comfyui_run): lists the node definitions this ComfyUI server supports — class types, required/optional inputs, and the model files each loader offers — so a temporary test or a new workflow for this environment uses real names. Not needed to generate with saved workflows (comfyui_workflow). Optional `filter` narrows by class-name substring, e.g. "KSampler", "Loader".',
     parameters: {
       type: 'object',
       properties: {
@@ -520,10 +690,10 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
   return {
     name: 'comfyui_workflow',
     description: [
-      'List and run saved ComfyUI workflows from the plugin workflow library (运行主题: API-format workflows extracted from a graph or pasted directly).',
+      'The way to generate images, video or audio with ComfyUI: list the saved workflows (set up for this server), pick the one that fits, run it. Lists and runs workflows from the plugin workflow library (运行主题: API-format workflows extracted from a graph or pasted directly).',
       '`action: list` returns every runnable workflow with its id, name, description (what the workflow does), and input notes.',
       'It also lists workflows the user saved on the ComfyUI server (衍生主题: UI graph format canvases). A graph may hold SEVERAL independent flows; each is extracted into its own runnable workflow in the panel (整体/按分量/主流程). A graph with no extracted workflow yet cannot run — tell the user to open the ComfyUI panel and 提取 it first.',
-      '`action: run` runs one saved workflow by id — pass only the id plus parameter overrides; the plugin submits the saved workflow JSON itself (never copy the JSON into your reply). It waits for media by default; add `mode: "async"` to run in the background and collect the result with job_output.',
+      '`action: run` runs one saved workflow by id — pass only the id plus parameter overrides keyed by the exact names from list (unknown names are rejected; parameters not passed use their defaults). Fill prompt parameters from what the user asked for, improvising from the request when unspecified. Call it directly, not from run_code, so the user sees the result card. The plugin submits the saved workflow JSON itself (never copy the JSON into your reply). It waits for media by default; add `mode: "async"` to run in the background — then end your turn instead of waiting; a completion notice brings you back, and job_output returns the media as ready-to-paste Markdown. Results are final and carry the media URLs — never re-check status or look addresses up; paste the Markdown lines the result gives into your reply to show the media.',
       '`action: get` returns one saved workflow\'s complete API-format JSON by id for inspection/diagnostics only — it consumes many tokens and is not the run path.',
       '`action: refresh` re-derives one saved workflow\'s parameter snapshot (options / numberKind / min/max/step) from the current node definitions and saves it back. Run it after the TTS-Audio-Suite voice library or node definitions changed: saved workflows snapshot their parameter options at save time, so a freshly added voice is not accepted by `action: run` until the snapshot catches up. It force-rescans the TTS voice library first, then updates only the fields derived from object_info — the parameter set (including user-added advanced parameters) is preserved. Returns `changed` with the parameter names that actually changed.',
     ].join(' '),
@@ -532,7 +702,7 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
       properties: {
         action: { type: 'string', enum: ['list', 'run', 'get', 'refresh'], description: 'list returns the workflow library; run executes one workflow by id (direct call to the saved JSON); get returns one workflow\'s full JSON for inspection; refresh re-derives one workflow\'s parameter snapshot from the current node definitions and saves it back.' },
         id: { type: 'string', description: 'Workflow id (required for action: run and get).' },
-        mode: { type: 'string', enum: ['sync', 'async'], description: 'run mode (default sync); async starts a background job and returns its id for job_output. Video/audio workflows should use async — generation takes minutes and sync may time out.' },
+        mode: { type: 'string', enum: ['sync', 'async'], description: 'run mode (default sync); async starts a background job and returns its id immediately (end your turn after it; collect with job_output once notified). Video/audio workflows should use async — generation takes minutes and sync may time out.' },
         timeout_ms: { type: 'number', minimum: 5_000, maximum: 3_600_000, description: 'Generation wait budget in ms (default 900000 = 15 min). Video needs minutes; raise this for long videos.' },
         parameters: {
           type: 'object',
@@ -588,7 +758,7 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
           return [{ type: 'text', text: `ComfyUI workflow ${data.name ?? data.id}: ${JSON.stringify(data.workflow)}` }]
         }
         if (data.background !== undefined) {
-          return [{ type: 'text', text: `ComfyUI workflow started in the background (job ${data.background.jobId}, prompt ${data.background.promptId}). Collect the result with job_output.` }]
+          return [{ type: 'text', text: backgroundText('ComfyUI workflow', data.background) }]
         }
         if (data.action === 'refresh') {
           const changed = data.changed ?? []
@@ -614,14 +784,22 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
               const extra = skill.files > 1 ? `，另有 ${skill.files - 1} 篇参考文档` : ''
               lines.push(`  技能包${skill.required ? '（运行前必读）' : ''}: ${skill.summary}${extra} — 运行前先 action: skill { id: "${workflow.id}" }`)
             }
-            for (const param of workflow.parameters ?? []) {
+            // Prompt parameters carry the user's request, so they are marked to
+            // be filled from it and their saved default is not printed (a
+            // default shown here gets rerun verbatim); every other parameter
+            // is listed with its default.
+            const params = workflow.parameters ?? []
+            if (params.length > 0) lines.push('  参数（键名用括号前的英文名；未传的参数使用默认值）:')
+            for (const param of params) {
+              const prompt = promptRole(param) === 'write'
               const label = param.label ?? param.name
-              const def = param.default === undefined ? '' : `，默认 ${typeof param.default === 'string' ? `"${param.default}"` : String(param.default)}`
+              const def = prompt || param.default === undefined ? '' : `，默认 ${typeof param.default === 'string' ? `"${param.default}"` : String(param.default)}`
               const options = Array.isArray(param.options) && param.options.length > 0 ? `，可选: ${param.options.join(' / ')}` : ''
               const upload = param.upload !== undefined
                 ? `，上传类型: ${param.upload}${param.upload === 'media' ? `（${param.subfolder ?? ''}/，空值=移除该参考位）` : ''}`
                 : ''
-              lines.push(`  ${param.name}(${label}${param.random === true ? '，随机' : ''}${def}${options}${upload})`)
+              const fill = prompt ? ' — 按用户需求填写，未明确时据需求自行发挥' : ''
+              lines.push(`  ${param.name}(${label}${param.random === true ? '，随机' : ''}${def}${options}${upload})${fill}`)
             }
           }
           const loadArea = data.loadArea
@@ -646,9 +824,7 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
         }
         const result = data.result
         if (result === undefined) return [{ type: 'text', text: 'ComfyUI workflow run returned no result.' }]
-        const lines = [`ComfyUI workflow ${result.status} (prompt ${result.promptId}) in ${result.elapsedMs} ms — ${summarizeMedia(result.media)}`]
-        for (const item of result.media) lines.push(`  ${item.kind}: ${item.url}`)
-        return [{ type: 'text', text: lines.join('\n') }]
+        return [{ type: 'text', text: runResultText('ComfyUI workflow', result) }]
       },
       presentationMeta(_args, value) {
         return value
@@ -809,6 +985,15 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
       const values = typeof args.parameters === 'object' && args.parameters !== null
         ? (args.parameters as Record<string, unknown>)
         : {}
+      // Unknown names used to be ignored silently, so a misspelt prompt key
+      // ran the saved default and looked like "ComfyUI ignores my prompt".
+      // Refuse before anything is queued and name the valid keys instead.
+      const known = new Set((saved.parameters ?? []).map((param) => param.name))
+      const unknown = Object.keys(values).filter((name) => !known.has(name))
+      if (unknown.length > 0) {
+        throw new Error(`comfyui_workflow: "${saved.name}" has no parameter ${unknown.map((name) => `"${name}"`).join(', ')} — nothing was submitted. Valid parameter names: ${[...known].join(', ') || '(none)'}`)
+      }
+      const prompts = promptsUsed(saved.parameters ?? [], values)
       const promptId = await runtime.queue(saved.workflow, {
         workflowName: saved.name,
         workflowId: saved.id,
@@ -826,46 +1011,12 @@ function workflowDefinition(runtime: ComfyUIRuntime, ctx: Context): ToolDefiniti
         if (jobs === undefined) {
           throw new Error('comfyui_workflow: background jobs unavailable — load @deepseek-ai/dsh-jobs-local and @deepseek-ai/dsh-tool-jobs')
         }
-        const jobId = jobs.start({
-          kind: 'comfyui',
-          label: saved.name,
-          ...(exec.agent !== undefined ? { owner: exec.agent } : {}),
-          run: () => {
-            const startedAt = Date.now()
-            const done = (async () => {
-              try {
-                const entry = await client.waitForCompletion({
-                  promptId,
-                  timeoutMs: waitMs,
-                  pollIntervalMs: config.pollIntervalMs,
-                  signal: new AbortController().signal,
-                })
-                const items = collectMedia({ promptId, entry, maxItems: config.maxMediaItems, proxyBase: runtime.proxyBase() })
-                const result: RunResult = {
-                  kind: 'sync',
-                  promptId,
-                  status: 'completed',
-                  elapsedMs: Date.now() - startedAt,
-                  media: items,
-                  summary: summarizeMedia(items),
-                }
-                return { status: 'completed' as const, output: JSON.stringify(result) }
-              } catch (error) {
-                runtime.untrack(promptId)
-                const message = error instanceof Error ? error.message : String(error)
-                return { status: 'failed' as const, detail: 'comfyui', output: message }
-              }
-            })()
-            return {
-              cancel: () => { void client.interrupt().catch(() => undefined) },
-              done,
-            }
-          },
-        })
-        return { action: 'run', id, workflowName: saved.name, background: { kind: 'background', jobId, promptId, label: saved.name } }
+        const jobId = startPromptJob(jobs, runtime, client, { promptId, label: saved.name, subject: 'ComfyUI workflow', waitMs, agent: exec.agent, prompts })
+        const background: BackgroundResult = { kind: 'background', jobId, promptId, label: saved.name, notifies: sessionJobs(jobs) }
+        return { action: 'run', id, workflowName: saved.name, background, report: backgroundText('ComfyUI workflow', background) }
       }
-      const result = await waitSync(runtime, client, promptId, config, exec.signal, waitMs)
-      return { action: 'run', id, workflowName: saved.name, result }
+      const result = await waitSync(runtime, client, promptId, config, exec.signal, waitMs, { prompts })
+      return { action: 'run', id, workflowName: saved.name, result, report: runResultText('ComfyUI workflow', result) }
     },
   }
 }
@@ -1052,9 +1203,11 @@ function skillDefinition(runtime: ComfyUIRuntime): ToolDefinition {
 export function registerComfyUITools(ctx: Context, runtime: ComfyUIRuntime): Array<() => void> {
   const tools = (ctx as unknown as { tools: { register(definition: ToolDefinition): () => void } }).tools
   const disposers: Array<() => void> = []
-  disposers.push(tools.register(runDefinition(runtime, ctx)))
-  disposers.push(tools.register(objectInfoDefinition(runtime)))
+  // Main entry first: generating = comfyui_workflow list → run. The
+  // hand-written-workflow pair (object_info → run) is secondary and last.
   disposers.push(tools.register(workflowDefinition(runtime, ctx)))
   disposers.push(tools.register(skillDefinition(runtime)))
+  disposers.push(tools.register(objectInfoDefinition(runtime)))
+  disposers.push(tools.register(runDefinition(runtime, ctx)))
   return disposers
 }

@@ -1,12 +1,13 @@
 /**
  * Tool cards for comfyui_run and comfyui_workflow (tool.call.toolview, keys
- * 'comfyui_run' / 'comfyui_workflow'). A pure function of the frozen tool-call
- * block: running calls show a generating state, settled calls render the
- * presentationMeta payload (media wall with size labels, click-to-zoom
- * lightbox, status) that the host threaded into the session log.
+ * 'comfyui_run' / 'comfyui_workflow'). Running calls show the workflow name
+ * and live progress (polled from /comfyui/queue); settled calls show status
+ * and the output files as links. The media itself is NOT rendered here: the
+ * model pastes it into its reply (see CLAUDE.md contract 18) — dsh 0.2
+ * collapses finished tool rows and PTC mode shows no card at all, so an image
+ * wall here was either invisible or a duplicate of the reply.
  */
 import { createElement as h, useEffect, useState } from 'react'
-import { Lightbox } from './lightbox.js'
 
 interface MediaItem {
   filename: string
@@ -73,62 +74,98 @@ function parseArgs(raw: string): Record<string, unknown> {
   }
 }
 
-function argsSummary(args: Record<string, unknown>): string {
-  const parts: string[] = []
-  if (typeof args.template === 'string') parts.push(`template=${args.template}`)
-  if (args.mode !== undefined && args.mode !== 'sync') parts.push(`mode=${String(args.mode)}`)
-  if (parts.length === 0) parts.push('custom workflow')
-  return parts.join(' · ')
-}
-
-function aspectLabel(width: number, height: number): string {
-  const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b))
-  const g = gcd(width, height)
-  const rw = width / g
-  const rh = height / g
-  return rw <= 32 && rh <= 32 ? `${rw}:${rh}` : ''
-}
-
-function MediaItem({ item, t, onOpen }: {
-  item: MediaItem
-  t: ComfyUICardProps['t']
-  onOpen: () => void
-}): ReturnType<typeof h> {
-  const [size, setSize] = useState<{ width: number; height: number } | null>(null)
-  const [failed, setFailed] = useState(false)
-  const media = item.kind === 'video'
-    ? h('video', { src: item.url, controls: true, preload: 'metadata' })
-    : item.kind === 'audio'
-      ? h('audio', { src: item.url, controls: true, preload: 'metadata' })
-      : item.kind === 'image'
-        ? failed
-          ? h('span', { className: 'dsc-media-other' }, `${item.filename}（${t('cardLoadFailed')}）`)
-          : h('img', {
-              src: item.url,
-              alt: item.filename,
-              loading: 'lazy',
-              className: 'dsc-media-img dsc-media-img--clickable',
-              onClick: onOpen,
-              onLoad: (event: { target: { naturalWidth?: number; naturalHeight?: number } }) => {
-                const width = event.target.naturalWidth
-                const height = event.target.naturalHeight
-                if (typeof width === 'number' && typeof height === 'number' && width > 0 && height > 0) {
-                  setSize({ width, height })
-                }
-              },
-              onError: () => setFailed(true),
-            })
-        : h('span', { className: 'dsc-media-other' }, item.filename)
-  const ratio = size === null ? null : aspectLabel(size.width, size.height)
-  return h('div', { className: 'dsc-media' },
-    media,
-    h('div', { className: 'dsc-media-meta' },
-      size !== null
-        ? h('span', { className: 'dsc-media-size' }, `${size.width}×${size.height}${ratio !== '' ? ` · ${ratio}` : ''}`)
-        : null,
-      h('a', { href: item.url, download: item.filename, target: '_blank', rel: 'noreferrer' }, t('cardDownload')),
-    ),
+/** The output files as links (the images themselves are in the model's reply). */
+function MediaLinks({ media, t }: { media: MediaItem[]; t: ComfyUICardProps['t'] }): ReturnType<typeof h> {
+  if (media.length === 0) return h('div', { className: 'dsc-meta' }, t('cardEmpty'))
+  return h('div', { className: 'dsc-files' },
+    h('span', { className: 'dsc-meta' }, t('cardInReply')),
+    media.map((item) => h('a', {
+      key: `${item.node}-${item.index}-${item.filename}`,
+      className: 'dsc-file',
+      href: item.url,
+      target: '_blank',
+      rel: 'noreferrer',
+      title: item.filename,
+    }, item.filename)),
   )
+}
+
+/** Where one of our prompts stands in ComfyUI's queue. */
+type QueueState =
+  | { phase: 'pending'; ahead: number }
+  | { phase: 'running'; value: number; max: number }
+
+interface QueueEntry { promptId: string; ours: boolean; progress: { value: number; max: number } | null }
+
+/**
+ * Poll /comfyui/queue (every 2 s while `active`) for one prompt's queue
+ * position and sampler progress. A running sync call does not know its
+ * prompt id yet, so without one this follows the first prompt of ours that
+ * is running (else pending) — sync calls block, so that is the call's own.
+ */
+function useQueueState(promptId: string | undefined, active: boolean): QueueState | null {
+  const [state, setState] = useState<QueueState | null>(null)
+  useEffect(() => {
+    if (!active) return undefined
+    let stopped = false
+    let timer: number | undefined
+    const poll = async (): Promise<void> => {
+      try {
+        const response = await fetch('/comfyui/queue', { headers: { accept: 'application/json' } })
+        const data = (await response.json()) as { ok?: boolean; running?: QueueEntry[]; pending?: QueueEntry[] }
+        if (stopped) return
+        const running = data.running ?? []
+        const pending = data.pending ?? []
+        const match = (entry: QueueEntry): boolean => promptId !== undefined ? entry.promptId === promptId : entry.ours
+        const run = running.find(match)
+        const waitIndex = pending.findIndex(match)
+        if (run !== undefined) {
+          setState({ phase: 'running', value: run.progress?.value ?? 0, max: run.progress?.max ?? 0 })
+        } else if (waitIndex >= 0) {
+          setState({ phase: 'pending', ahead: running.length + waitIndex })
+        } else {
+          setState(null)
+        }
+      } catch {
+        // Best-effort: keep the last known state and try again.
+      }
+      if (!stopped) timer = window.setTimeout(() => { void poll() }, 2_000)
+    }
+    void poll()
+    return () => {
+      stopped = true
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [promptId, active])
+  return state
+}
+
+function ProgressLine({ state, t }: { state: QueueState | null; t: ComfyUICardProps['t'] }): ReturnType<typeof h> {
+  if (state === null) return h('div', { className: 'dsc-meta' }, t('cardWaiting'))
+  if (state.phase === 'pending') return h('div', { className: 'dsc-meta' }, t('cardQueued', { n: state.ahead }))
+  const percent = state.max > 0 ? Math.min(100, Math.round((state.value / state.max) * 100)) : 0
+  return h('div', { className: 'dsc-progress' },
+    h('div', { className: 'dsc-progress-track' }, h('div', { className: 'dsc-progress-fill', style: { width: `${percent}%` } })),
+    h('span', { className: 'dsc-meta' }, state.max > 0 ? t('cardStep', { value: state.value, max: state.max }) : t('cardWaiting')),
+  )
+}
+
+/** A saved workflow's name by id, for the running card of comfyui_workflow run. */
+function useWorkflowName(id: string | undefined): string | undefined {
+  const [name, setName] = useState<string | undefined>(undefined)
+  useEffect(() => {
+    if (id === undefined) return undefined
+    let stopped = false
+    void fetch('/comfyui/workflows', { headers: { accept: 'application/json' } })
+      .then(async (response) => (await response.json()) as { workflows?: Array<{ id: string; name: string }> })
+      .then((data) => {
+        const found = data.workflows?.find((workflow) => workflow.id === id)
+        if (!stopped && found !== undefined) setName(found.name)
+      })
+      .catch(() => undefined)
+    return () => { stopped = true }
+  }, [id])
+  return name
 }
 
 function ResultCard({ title, result, t }: {
@@ -137,9 +174,6 @@ function ResultCard({ title, result, t }: {
   t: ComfyUICardProps['t']
 }): ReturnType<typeof h> {
   const failed = result.status === 'interrupted'
-  const [lightbox, setLightbox] = useState<number | null>(null)
-  const urls = result.media.map((item) => item.url)
-  const kinds = result.media.map((item) => item.kind)
   return h('div', { className: 'dsc-card' },
     h('div', { className: 'dsc-card-head' },
       title !== '' ? h('span', { className: 'dsc-badge' }, title) : null,
@@ -149,17 +183,7 @@ function ResultCard({ title, result, t }: {
       h('span', { className: 'dsc-meta' }, `${t('cardElapsed')} ${result.elapsedMs} ms`),
     ),
     h('div', { className: 'dsc-meta' }, result.summary),
-    result.media.length > 0
-      ? h('div', { className: 'dsc-grid' }, result.media.map((item, index) => h(MediaItem, {
-          key: `${item.node}-${item.index}`,
-          item,
-          t,
-          onOpen: () => setLightbox(index),
-        })))
-      : h('div', { className: 'dsc-meta' }, t('cardEmpty')),
-    lightbox !== null
-      ? h(Lightbox, { t, images: urls, kinds, index: lightbox, onClose: () => setLightbox(null), onIndex: setLightbox })
-      : null,
+    h(MediaLinks, { media: result.media, t }),
   )
 }
 
@@ -183,7 +207,7 @@ function BackgroundCard({ label, promptId, t }: {
   // the plugin's asset index — which records every completed run's media with
   // healed proxy URLs — and settles instead of polling forever.
   const [result, setResult] = useState<{ status: string; media?: MediaItem[]; error?: string; recovered?: boolean } | null>(null)
-  const [lightbox, setLightbox] = useState<number | null>(null)
+  const queue = useQueueState(promptId, result === null)
 
   useEffect(() => {
     let stopped = false
@@ -259,8 +283,6 @@ function BackgroundCard({ label, promptId, t }: {
 
   if (result !== null && (result.status === 'completed' || result.status === 'failed')) {
     const media = result.media ?? []
-    const urls = media.map((item) => item.url)
-    const kinds = media.map((item) => item.kind)
     return h('div', { className: 'dsc-card' },
       h('div', { className: 'dsc-card-head' },
         h('span', { className: result.status === 'failed' ? 'dsc-badge dsc-badge--err' : 'dsc-badge dsc-badge--ok' },
@@ -272,17 +294,7 @@ function BackgroundCard({ label, promptId, t }: {
         : null,
       result.status === 'failed'
         ? h('div', { className: 'dsc-meta dsc-job-error' }, result.error ?? t('cardFailed'))
-        : media.length > 0
-          ? h('div', { className: 'dsc-grid' }, media.map((item, index) => h(MediaItem, {
-              key: `${item.node}-${item.index}`,
-              item,
-              t,
-              onOpen: () => setLightbox(index),
-            })))
-          : h('div', { className: 'dsc-meta' }, t('cardEmpty')),
-      lightbox !== null
-        ? h(Lightbox, { t, images: urls, kinds, index: lightbox, onClose: () => setLightbox(null), onIndex: setLightbox })
-        : null,
+        : h(MediaLinks, { media, t }),
     )
   }
 
@@ -291,7 +303,7 @@ function BackgroundCard({ label, promptId, t }: {
       h('span', { className: 'dsc-badge' }, t('cardBackground')),
       h('span', { className: 'dsc-meta' }, `${label} · ${promptId}`),
     ),
-    h('div', { className: 'dsc-meta' }, t('cardCollect')),
+    h(ProgressLine, { state: queue, t }),
   )
 }
 
@@ -358,16 +370,37 @@ function SettledCard({ block, t }: { block: ToolResultNode; t: ComfyUICardProps[
   return h(ResultCard, { title: '', result: meta, t })
 }
 
+/** A call still running: what is generating, and how far along it is. */
+function RunningCard({ block, t }: { block: RunningToolCall; t: ComfyUICardProps['t'] }): ReturnType<typeof h> {
+  const args = parseArgs(block.argsRaw)
+  const isRun = block.name === 'comfyui_run' || args.action === 'run'
+  const workflowId = block.name === 'comfyui_workflow' && typeof args.id === 'string' ? args.id : undefined
+  const savedName = useWorkflowName(isRun ? workflowId : undefined)
+  // Async calls return at once; their progress lives on the background card.
+  const queue = useQueueState(undefined, isRun && args.mode !== 'async')
+  if (!isRun) {
+    return h('div', { className: 'dsc-card' },
+      h('div', { className: 'dsc-card-head' },
+        h('span', { className: 'dsc-badge' }, block.name),
+        typeof args.action === 'string' ? h('span', { className: 'dsc-meta' }, args.action) : null,
+      ),
+    )
+  }
+  const title = block.name === 'comfyui_run' ? t('cardHandWritten') : savedName ?? workflowId ?? ''
+  return h('div', { className: 'dsc-card' },
+    h('div', { className: 'dsc-card-head' },
+      h('span', { className: 'dsc-badge' }, t('cardGenerating')),
+      title !== '' ? h('span', { className: 'dsc-meta' }, `${t('cardWorkflow')} ${title}`) : null,
+      h('span', { className: 'dsc-meta' }, `${t('cardMode')} ${String(args.mode ?? 'sync')}`),
+    ),
+    args.mode === 'async' ? null : h(ProgressLine, { state: queue, t }),
+  )
+}
+
 /** The card component: picks running vs settled rendering from the block. */
 export function ComfyUICard({ t, block }: ComfyUICardProps): ReturnType<typeof h> {
   if (isResultNode(block)) {
     return h(SettledCard, { block, t })
   }
-  const args = parseArgs(block.argsRaw)
-  return h('div', { className: 'dsc-card' },
-    h('div', { className: 'dsc-card-head' },
-      h('span', { className: 'dsc-badge' }, t('cardGenerating')),
-      h('span', { className: 'dsc-meta' }, `${t('cardWorkflow')} ${argsSummary(args)} · ${t('cardMode')} ${String(args.mode ?? 'sync')}`),
-    ),
-  )
+  return h(RunningCard, { block, t })
 }

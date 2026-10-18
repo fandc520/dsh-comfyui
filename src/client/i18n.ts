@@ -46,6 +46,11 @@ export const zh = {
   cardWorkflow: '工作流',
   cardMode: '模式',
   cardListed: '已列出 {runs} 个运行工作流，{graphs} 个图工作流',
+  cardHandWritten: '手写工作流',
+  cardWaiting: '等待 ComfyUI…',
+  cardQueued: '排队中（前面还有 {n} 个）',
+  cardStep: '步数 {value}/{max}',
+  cardInReply: '结果图见对话回复，文件：',
   // panel shell
   panelTitle: 'ComfyUI 面板',
   panelReset: '复位位置与大小',
@@ -321,6 +326,11 @@ export const en = {
   cardWorkflow: 'Workflow',
   cardMode: 'Mode',
   cardListed: 'Listed {runs} runnable workflows, {graphs} graph workflows',
+  cardHandWritten: 'Hand-written workflow',
+  cardWaiting: 'Waiting for ComfyUI…',
+  cardQueued: 'Queued ({n} ahead)',
+  cardStep: 'Step {value}/{max}',
+  cardInReply: 'Results are shown in the reply. Files:',
   // panel shell
   panelTitle: 'ComfyUI Panel',
   panelReset: 'Reset position & size',

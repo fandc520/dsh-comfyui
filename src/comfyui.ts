@@ -358,6 +358,26 @@ export class ComfyUIClient {
     })
   }
 
+  /**
+   * Stop one prompt without touching anyone else's work: dequeue it while
+   * pending, interrupt it only while it is the running one, no-op once it has
+   * left the queue. A bare `interrupt()` stops whatever is running — another
+   * session's job or the user's own ComfyUI run — and ComfyUI versions before
+   * prompt-scoped interrupts ignore the `prompt_id` body, hence the queue
+   * check. (Older servers keep a tiny race: the prompt could finish between
+   * the check and the interrupt.)
+   */
+  async cancelPrompt(promptId: string): Promise<void> {
+    const queue = await this.getQueue()
+    if (queue.queue_pending.some((item) => item.prompt_id === promptId)) {
+      await this.deleteQueueItems([promptId])
+      return
+    }
+    if (queue.queue_running.some((item) => item.prompt_id === promptId)) {
+      await this.interruptPrompt(promptId)
+    }
+  }
+
   /** Interrupt the running prompt; without an id, interrupt globally. */
   async interruptPrompt(promptId?: string): Promise<void> {
     await this.request('/interrupt', {
@@ -459,11 +479,6 @@ export class ComfyUIClient {
     return this.request<{ system?: { comfyui_version?: string } }>('/system_stats')
   }
 
-  /** Ask ComfyUI to interrupt the running prompt. */
-  async interrupt(): Promise<void> {
-    await this.request<unknown>('/interrupt', { method: 'POST' })
-  }
-
   /** Download one generated media file through GET /view. */
   async fetchView(ref: ComfyUIMediaRef): Promise<{ bytes: Uint8Array; contentType: string }> {
     const params = new URLSearchParams({ filename: ref.filename, subfolder: ref.subfolder, type: ref.type })
@@ -509,12 +524,14 @@ export class ComfyUIClient {
       if (rangeHeader !== undefined) headers['Range'] = rangeHeader
       const response = await this.fetchRoute(`/view?${params.toString()}`, { headers, method, signal: controller.signal })
       if (response.status !== 206 && response.status !== 416 && !response.ok) {
-        throw new ComfyUIError(`ComfyUI /view failed: HTTP ${response.status}`)
+        await response.body?.cancel().catch(() => undefined)
+        throw new ComfyUIError(`ComfyUI /view failed: HTTP ${response.status}`, response.status)
       }
       if (response.status === 200) {
         const contentLength = response.headers.get('content-length')
         if (contentLength !== null && Number(contentLength) > this.maxMediaBytes) {
-          throw new ComfyUIError(`ComfyUI media too large: ${contentLength} bytes exceeds maxMediaBytes ${this.maxMediaBytes}`)
+          await response.body?.cancel().catch(() => undefined)
+          throw new ComfyUIError(`ComfyUI media too large: ${contentLength} bytes exceeds maxMediaBytes ${this.maxMediaBytes}`, 413)
         }
       }
       return { status: response.status, headers: response.headers, body: response.body }
@@ -525,21 +542,25 @@ export class ComfyUIClient {
 
   /**
    * Poll history until the prompt completes, fails, or the budget/signal ends.
-   * Interrupts the server when the signal aborts before throwing.
+   * When the signal aborts — mid-sleep included — cancels this prompt only
+   * (`cancelPrompt`) and throws an "interrupted" error. `onPoll` runs once per
+   * poll, for callers that publish progress.
    */
   async waitForCompletion(opts: {
     promptId: string
     timeoutMs: number
     pollIntervalMs: number
     signal: AbortSignal
+    onPoll?: () => void
   }): Promise<ComfyUIHistoryEntry> {
-    const { promptId, timeoutMs, pollIntervalMs, signal } = opts
+    const { promptId, timeoutMs, pollIntervalMs, signal, onPoll } = opts
     const deadline = Date.now() + timeoutMs
     for (;;) {
       if (signal.aborted) {
-        await this.interrupt().catch(() => undefined)
+        await this.cancelPrompt(promptId).catch(() => undefined)
         throw new ComfyUIError(`ComfyUI generation interrupted (prompt ${promptId})`)
       }
+      onPoll?.()
       const entry = await this.getHistory(promptId)
       if (entry !== undefined) {
         const status = entry.status
@@ -553,7 +574,8 @@ export class ComfyUIClient {
       if (Date.now() >= deadline) {
         throw new ComfyUIError(`ComfyUI generation timed out after ${timeoutMs} ms (prompt ${promptId})`)
       }
-      await sleep(pollIntervalMs, signal)
+      // An abort ends the sleep early; the loop top then cancels and throws.
+      await sleep(pollIntervalMs, signal).catch(() => undefined)
     }
   }
 }
