@@ -47,6 +47,15 @@ Clicking the "ComfyUI Panel" button in the session header probes the backend's c
 
 <p align="center"><img src="images/panel.png" width="70%" alt="Main panel: workflows / assets / queue" title="Main panel: workflows / assets / queue" /></p>
 
+### Detached window (drag the panel anywhere on screen)
+
+The **⧉** button in the panel header pops the whole panel out into its own operating-system window: drag it anywhere on screen, onto a second display, or keep it above other apps — no longer clipped by the DSH window viewport. **⇲** inside that window docks it back.
+
+- The detached panel is rendered by a **second React root** (not a portal, not moved DOM): React 18 binds a root's delegated listeners to the `document` owning its container, so a cross-document portal paints but every button is dead. A fresh root inside the target document keeps interactions identical.
+- Theme, stylesheets and `<base>` are copied over, so colors, images and videos (`/comfyui/media`) keep working; the lightbox keys (Esc / ← / →) and hover-paste listen on both documents.
+- Two channels, in order: `window.open` (a real window; the desktop host must whitelist the frame name `dsh-comfyui-panel`) then Document Picture-in-Picture (an always-on-top mini window; Electron 44 resolves the request and then tears the window down, hence the liveness check). When neither works the panel header shows a one-line notice instead of failing silently.
+- Closing the panel (✕) or leaving the session docks the window back — no orphan windows.
+
 ### Load area (media loader)
 
 A media loader at the top of the Workflows tab, in the style of ComfyUI's LoadImage node: visual picking (with in-place playback for video/audio), paste/upload, and multiple slots. Filled slots fill the workflow's unset loader parameters in order — **the agent doesn't need to guess file names**; unset `width`/`height` auto-match the source image's size. Uploads are renamed by content hash (dedup).

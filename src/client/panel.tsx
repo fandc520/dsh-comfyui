@@ -5,11 +5,19 @@
  * corner handle; geometry persists in localStorage. Renders null while closed
  * (the overlay layer is click-through, so nothing blocks the app underneath).
  */
-import { Component, createElement as h, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Component, createElement as h, useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { getJson, getList, postJson, postRaw } from './api.ts'
 import { panelStore, usePanelOpen, usePanelTab } from './panel-store.ts'
 import { ComfyUIIcon } from './trigger.tsx'
 import { Lightbox } from './lightbox.js'
+import {
+  attachDetached,
+  dockDetached,
+  getDetachedSession,
+  onPanelDocuments,
+  renderIntoSession,
+  subscribeDetached,
+} from './detached-window.ts'
 
 /** Panel geometry: pixel position/size once the user dragged or resized. */
 interface PanelGeom {
@@ -87,6 +95,19 @@ interface PointerEventLike {
 
 export interface ComfyUIPanelProps {
   t: (key: string, ...rest: unknown[]) => string
+}
+
+/**
+ * Props of the panel view. The host component at the bottom of this file owns
+ * the app-vs-window lifecycle; the view only knows which document it is in.
+ */
+export interface ComfyUIPanelViewProps extends ComfyUIPanelProps {
+  /** Mounted inside a detached OS window: no viewport anchoring, no dragging. */
+  detached?: boolean
+  /** Transient one-line notice above the tabs (e.g. the popup was refused). */
+  notice?: string
+  /** Move the panel between the app viewport and a detached window. */
+  onToggleDetached?: () => void
 }
 
 interface MediaItem {
@@ -412,8 +433,7 @@ function UploadSelect(props: {
     const onDoc = (event: MouseEvent): void => {
       if (ref.current !== null && !ref.current.contains(event.target as Node)) setOpen(false)
     }
-    document.addEventListener('mousedown', onDoc)
-    return () => document.removeEventListener('mousedown', onDoc)
+    return onPanelDocuments('mousedown', onDoc)
   }, [open])
 
   // Pull the live file list from the server every time the menu opens, so
@@ -696,8 +716,7 @@ function ParameterEditor(props: {
       event.preventDefault()
       void latestRef.current.uploadFile(param, file)
     }
-    document.addEventListener('paste', onPaste)
-    return () => document.removeEventListener('paste', onPaste)
+    return onPanelDocuments('paste', onPaste)
   }, [])
 
   /** Auto-generate the internal parameter name from the input key, deduped against existing params. */
@@ -1076,7 +1095,12 @@ function formatBytes(bytes: number | undefined): string {
 }
 
 /** The panel shell: header (drag handle), tabs, and the active tab body. */
-export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | null {
+export function ComfyUIPanelView({
+  t,
+  detached = false,
+  notice = '',
+  onToggleDetached,
+}: ComfyUIPanelViewProps): ReturnType<typeof h> | null {
   const open = usePanelOpen()
   const tab = usePanelTab()
   const [geom, setGeom] = useState<PanelGeom>(() => healGeom(loadGeom(), window.innerWidth, window.innerHeight))
@@ -1109,6 +1133,9 @@ export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | n
   }, [open])
 
   const startDrag = (event: PointerEventLike, mode: 'move' | 'resize'): void => {
+    // Inside a detached window the OS owns the geometry: dragging is done by the
+    // window's title bar and the panel simply fills the window.
+    if (detached) return
     if (event.button !== 0) return
     if (mode === 'move') {
       const target = event.target as HTMLElement | null
@@ -1158,17 +1185,21 @@ export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | n
   if (!open) return null
 
   const panelStyle: Record<string, string> = {}
-  if (geom.x !== undefined && geom.y !== undefined) {
+  if (!detached && geom.x !== undefined && geom.y !== undefined) {
     panelStyle.left = `${geom.x}px`
     panelStyle.top = `${geom.y}px`
     panelStyle.right = 'auto'
     panelStyle.bottom = 'auto'
   }
-  if (geom.width !== undefined) panelStyle.width = `${geom.width}px`
-  if (geom.height !== undefined) panelStyle.height = `${geom.height}px`
+  if (!detached && geom.width !== undefined) panelStyle.width = `${geom.width}px`
+  if (!detached && geom.height !== undefined) panelStyle.height = `${geom.height}px`
 
   return h('div',
-    { ref: panelRef, className: `dsc-panel${dragging !== null ? ' dsc-panel--dragging' : ''}`, style: panelStyle },
+    {
+      ref: panelRef,
+      className: `dsc-panel${detached ? ' dsc-panel--detached' : ''}${dragging !== null ? ' dsc-panel--dragging' : ''}`,
+      style: panelStyle,
+    },
     h('div', {
       className: 'dsc-panel-head',
       onPointerDown: (event: PointerEventLike) => startDrag(event, 'move'),
@@ -1181,6 +1212,13 @@ export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | n
         h('span', null, t('panelTitle')),
       ),
       h('span', { className: 'dsc-panel-head-actions' },
+        h('button', {
+          className: 'dsc-panel-float',
+          type: 'button',
+          title: detached ? t('panelDock') : t('panelFloat'),
+          'aria-label': detached ? t('panelDock') : t('panelFloat'),
+          onClick: () => { onToggleDetached?.() },
+        }, detached ? '\u21f2' : '\u29c9'),
         h('button', {
           className: 'dsc-panel-reset',
           type: 'button',
@@ -1204,6 +1242,7 @@ export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | n
         }, '✕'),
       ),
     ),
+    notice === '' ? null : h('div', { className: 'dsc-panel-notice' }, notice),
     h('div', { className: 'dsc-tabs' },
       h(TabButton, { t, active: tab === 'workflows', label: t('tabWorkflows'), onClick: () => panelStore.setTab('workflows') }),
       h(TabButton, { t, active: tab === 'assets', label: t('tabAssets'), onClick: () => panelStore.setTab('assets') }),
@@ -1225,7 +1264,7 @@ export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | n
       onClose: () => setLightbox(null),
       onIndex: (index: number) => setLightbox({ images: lightbox.images, kinds: lightbox.kinds, index }),
     }) : null,
-    h('div', {
+    detached ? null : h('div', {
       className: 'dsc-panel-resize',
       onPointerDown: (event: PointerEventLike) => startDrag(event, 'resize'),
       onPointerMove: (event: PointerEventLike) => moveDrag(event),
@@ -1233,6 +1272,56 @@ export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | n
       onPointerCancel: () => endDrag(),
     }),
   )
+}
+
+/**
+ * Panel host: renders the view in the app viewport, and mounts a second React
+ * root in a detached OS window once the user pops the panel out. The window
+ * follows the panel's open state — closing the panel closes the window, closing
+ * the window puts the panel back — and both channels failing surfaces a notice
+ * instead of doing nothing.
+ */
+export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | null {
+  const open = usePanelOpen()
+  const session = useSyncExternalStore(subscribeDetached, getDetachedSession, getDetachedSession)
+  const [notice, setNotice] = useState('')
+  // The detached root renders once per session; keep it on the current `t`
+  // without re-rendering the window on every parent render.
+  const tRef = useRef(t)
+  tRef.current = t
+
+  useEffect(() => {
+    if (session === null) return
+    const unmount = renderIntoSession(session, h(ComfyUIPanelView, {
+      t: (key: string, ...rest: unknown[]) => tRef.current(key, ...rest),
+      detached: true,
+      onToggleDetached: () => dockDetached(),
+    }))
+    return () => {
+      unmount()
+      dockDetached()
+    }
+  }, [session])
+
+  useEffect(() => {
+    // Closing the panel must not leave an orphan window behind.
+    if (!open) dockDetached()
+  }, [open])
+
+  const toggleDetached = (): void => {
+    if (session !== null) {
+      dockDetached()
+      return
+    }
+    void attachDetached(tRef.current('panelTitle')).then((attached) => {
+      setNotice(attached === null ? tRef.current('panelFloatFailed') : '')
+    })
+  }
+
+  // While the panel lives in its own window the app viewport renders nothing:
+  // the view below would otherwise stay visible in both places at once.
+  if (session !== null) return null
+  return h(ComfyUIPanelView, { t, notice, onToggleDetached: toggleDetached })
 }
 
 function TabButton(props: { t: ComfyUIPanelProps['t']; active: boolean; label: string; onClick: () => void }): ReturnType<typeof h> {
@@ -1481,8 +1570,7 @@ function LoadPicker(props: {
       event.preventDefault()
       void handleUpload(file)
     }
-    document.addEventListener('paste', onPaste)
-    return () => document.removeEventListener('paste', onPaste)
+    return onPanelDocuments('paste', onPaste)
   })
 
   /** Upload, then flash a confirmation and scroll the grid to the new file. */
@@ -3441,8 +3529,7 @@ function JobRow(props: {
     const onDoc = (event: MouseEvent): void => {
       if (menuRef.current !== null && !menuRef.current.contains(event.target as Node)) setMenuOpen(false)
     }
-    document.addEventListener('mousedown', onDoc)
-    return () => document.removeEventListener('mousedown', onDoc)
+    return onPanelDocuments('mousedown', onDoc)
   }, [menuOpen])
 
   const running = job.status === 'in_progress'

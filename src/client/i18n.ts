@@ -54,6 +54,9 @@ export const zh = {
   // panel shell
   panelTitle: 'ComfyUI 面板',
   panelReset: '复位位置与大小',
+  panelFloat: '独立浮窗（可拖到屏幕任意位置）',
+  panelDock: '收回面板（放回 DSH 窗口）',
+  panelFloatFailed: '当前环境未允许打开独立浮窗',
   close: '关闭',
   lbPrev: '上一张',
   lbNext: '下一张',
@@ -334,6 +337,9 @@ export const en = {
   // panel shell
   panelTitle: 'ComfyUI Panel',
   panelReset: 'Reset position & size',
+  panelFloat: 'Detach into its own window (draggable anywhere on screen)',
+  panelDock: 'Dock the panel back into the DSH window',
+  panelFloatFailed: 'This environment did not allow a detached window',
   close: 'Close',
   lbPrev: 'Previous image',
   lbNext: 'Next image',

@@ -4,6 +4,7 @@
  * (assets/queue previews) and the tool card (result images).
  */
 import { createElement as h, useEffect } from 'react'
+import { onPanelDocuments } from './detached-window.ts'
 
 export interface LightboxProps {
   t: (key: string, ...rest: unknown[]) => string
@@ -24,8 +25,9 @@ export function Lightbox({ t, images, kinds, index, onClose, onIndex }: Lightbox
       else if (event.key === 'ArrowLeft') onIndex((index - 1 + count) % count)
       else if (event.key === 'ArrowRight') onIndex((index + 1) % count)
     }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
+    // Keys must work while the panel (and therefore this lightbox) is popped
+    // out into its own window, so bind the document that actually renders it.
+    return onPanelDocuments('keydown', onKey)
   }, [index, count, onClose, onIndex])
   const src = images[index]
   if (src === undefined) return null

@@ -130,6 +130,10 @@ select.dsc-input option { background: var(--dsw-alias-bg-layer-1); color: var(--
 .dsc-panel-reset:hover { color: var(--dsw-alias-label-primary); }
 .dsc-panel-close { border: none; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; font-size: 14px; padding: 4px 8px; }
 .dsc-panel-close:hover { color: var(--dsw-alias-label-primary); }
+.dsc-panel-float { border: none; background: transparent; color: var(--dsw-alias-label-tertiary); cursor: pointer; font-size: 13px; padding: 4px 6px; line-height: 1; }
+.dsc-panel-float:hover { color: var(--dsw-alias-label-primary); }
+/* One-line notice above the tabs (e.g. the environment refused a detached window). */
+.dsc-panel-notice { padding: 6px 12px; font-size: 12px; color: var(--dsw-alias-label-secondary); border-bottom: 1px solid var(--dsw-alias-border-l1); }
 .dsc-tabs { display: flex; border-bottom: 1px solid var(--dsw-alias-border-l1); }
 .dsc-tab {
   flex: 1; padding: 8px 4px; background: transparent; border: none;
@@ -423,6 +427,33 @@ video.dsc-picker-player { max-height: 180px; }
 .dsc-transfer-empty { padding: 40px 12px; text-align: center; color: var(--dsw-alias-label-tertiary); font-size: 13px; }
 .dsc-btn--primary { background: var(--dsw-alias-brand-primary); border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-bg-layer-1); }
 .dsc-btn--primary:disabled { opacity: 0.5; cursor: default; }
+`
+
+/**
+ * Stylesheet for the detached panel window (detached-window.ts). The detached
+ * document gets a clone of `CSS` first, so this block only overrides what a
+ * window-sized panel should not keep: viewport anchoring, rounding, the resize
+ * handle and the drag cursor (an OS window has its own title bar).
+ */
+export const DETACHED_DOCUMENT_CSS = `
+html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+#dsh-comfyui-detached-root { height: 100%; }
+.dsc-panel--detached {
+  position: static !important;
+  inset: auto !important;
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+  min-width: 0 !important;
+  max-height: none !important;
+  min-height: 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  z-index: auto !important;
+}
+.dsc-panel--detached .dsc-panel-head { cursor: default; }
+.dsc-panel--detached .dsc-panel-resize { display: none !important; }
 `
 
 /** Inject the stylesheet once (idempotent), owned by this plugin for HMR. */
