@@ -96,7 +96,7 @@ dsh plugin --profile desktop add dsh-comfyui
 - "生成一段 5 秒的短视频：日落下的城市"
 - "用我之前在 ComfyUI 里保存的 Krea-Afterlight 跑一下"（若该图还没提取，Agent 会转告你先去面板点**提取**）
 
-远程 ComfyUI 若位于需鉴权的代理之后，通过凭据存储或 `apiKeyEnv` 指定的环境变量（默认 `COMFYUI_API_KEY`）提供密钥，绝不发给浏览器。
+远程 ComfyUI 若位于需鉴权的代理之后，通过凭据存储或 `apiKeyEnv` 指定的环境变量（默认 `COMFYUI_API_KEY`）提供密钥，绝不发给浏览器。只转发 `/api/*` 的代理和 Comfy Cloud（`https://cloud.comfy.org`，需付费订阅的 `comfyui-` 开头 API Key）会自动识别 `/api` 前缀。
 
 ## 配置
 

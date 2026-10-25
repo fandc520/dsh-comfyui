@@ -714,6 +714,44 @@ globalThis.fetch = realFetch
 }
 
 // ---------------------------------------------------------------------------
+// 3d. Route prefix on an SPA host (Comfy Cloud, #23): the bare path answers
+// 200 text/html (frontend fallback), only /api/* is the API. The HTML success
+// must not be learned as the bare prefix; the probe retries under /api.
+// ---------------------------------------------------------------------------
+{
+  const { ComfyUIClient } = await import('../lib/comfyui.js')
+  const seen = []
+  globalThis.fetch = async (url, init) => {
+    const parsed = new URL(String(url))
+    seen.push(`${parsed.pathname} ${init?.headers?.Authorization ?? ''}`)
+    if (!parsed.pathname.startsWith('/api/')) {
+      return new Response('<!doctype html><title>Comfy</title>', { status: 200, headers: { 'content-type': 'text/html' } })
+    }
+    const json = (body) =>
+      new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    if (parsed.pathname === '/api/system_stats') return json({ system: { comfyui_version: 'v0.42.5' } })
+    if (parsed.pathname === '/api/object_info') return json({ KSampler: {} })
+    return new Response('{"code":"NOT_FOUND"}', { status: 404, headers: { 'content-type': 'application/json' } })
+  }
+  try {
+    const client = new ComfyUIClient('https://cloud.example.test/', 'comfyui-test-key', 1000, 1024)
+    const stats = await client.systemStats()
+    const info = await client.objectInfo()
+    check(
+      'SPA host: an HTML 200 on the bare path retries under /api and learns the prefix (Bearer key sent)',
+      stats?.system?.comfyui_version === 'v0.42.5' && info.KSampler !== undefined &&
+        seen.join('|') ===
+          '/system_stats Bearer comfyui-test-key|/api/system_stats Bearer comfyui-test-key|/api/object_info Bearer comfyui-test-key',
+      seen.join(' | '),
+    )
+  } catch (error) {
+    failures += 1
+    console.log(`  FAIL SPA-host prefix check threw — ${error && error.stack ? error.stack : error}`)
+  }
+  globalThis.fetch = realFetch
+}
+
+// ---------------------------------------------------------------------------
 // 4. Identity consistency: every artifact the host resolves BY PACKAGE NAME
 // must carry the current package name (a fork that renames the package must
 // not have to chase literals). Two failure modes were hit in the field:

@@ -136,6 +136,11 @@ export function guessContentType(filename: string): string {
   return 'application/octet-stream'
 }
 
+/** True for an HTML page — a frontend fallback, never a ComfyUI API answer. */
+function isHtml(response: Response): boolean {
+  return (response.headers.get('content-type') ?? '').toLowerCase().startsWith('text/html')
+}
+
 /** The per-process client id ComfyUI uses to correlate queued prompts. */
 export const CLIENT_ID = randomUUID()
 
@@ -143,8 +148,11 @@ export const CLIENT_ID = randomUUID()
  * Route prefix learned per base URL: '' when bare routes answer, '/api' when
  * only the /api-prefixed mirror does. ComfyUI serves every route under both,
  * but API-only reverse proxies (comfy-api-proxy, Issue #6) forward just
- * `/api/*`, so the bare /system_stats probe 404s. Learned on the first
- * request and kept for the process — clients are created per call.
+ * `/api/*`, so the bare /system_stats probe 404s. Comfy Cloud (#23) is the
+ * other shape: its frontend's SPA fallback answers every unknown bare path
+ * with 200 text/html, so an HTML success counts as a miss too — no API route
+ * returns HTML. Learned on the first request and kept for the process —
+ * clients are created per call.
  */
 const routePrefix = new Map<string, '' | '/api'>()
 
@@ -166,18 +174,19 @@ export class ComfyUIClient {
     return `${this.base()}${routePrefix.get(this.base()) ?? ''}${path}`
   }
 
-  /** fetch() one route, retrying a 404 under /api until the prefix is known. */
+  /** fetch() one route, retrying a miss (404, or an HTML page) under /api
+   * until the prefix is known. */
   private async fetchRoute(path: string, init: RequestInit): Promise<Response> {
     const base = this.base()
     const response = await fetch(this.endpoint(path), init)
     if (path.startsWith('/api/') || routePrefix.has(base)) return response
-    if (response.ok) {
+    if (response.ok && !isHtml(response)) {
       routePrefix.set(base, '')
       return response
     }
-    if (response.status !== 404) return response
+    if (!response.ok && response.status !== 404) return response
     const retry = await fetch(`${base}/api${path}`, init)
-    if (!retry.ok) {
+    if (!retry.ok || isHtml(retry)) {
       await retry.body?.cancel()
       return response
     }
