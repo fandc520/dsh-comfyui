@@ -96,7 +96,7 @@ Just tell the agent, e.g.:
 - "Generate a 5-second clip: city at sunset"
 - "Run my Krea-Afterlight saved in ComfyUI" (if the graph isn't extracted yet, the agent will ask you to **extract** it in the panel first)
 
-For a remote ComfyUI behind an authenticated proxy, provide the key via credential storage or the `apiKeyEnv` env var (default `COMFYUI_API_KEY`) — it is resolved on the host and never sent to the browser.
+For a remote ComfyUI behind an authenticated proxy, provide the key via credential storage or the `apiKeyEnv` env var (default `COMFYUI_API_KEY`) — it is resolved on the host and never sent to the browser. Proxies that forward only `/api/*` and Comfy Cloud (`https://cloud.comfy.org`, with a `comfyui-` API key from a paid plan) are detected automatically and use the `/api` prefix.
 
 ## Configuration
 
