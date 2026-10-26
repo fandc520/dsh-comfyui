@@ -1,9 +1,10 @@
 /**
  * The ComfyUI panel (shell.overlay, id 'comfyui.panel'): a floating panel
- * with three tabs — workflow library management, generated asset preview,
- * and the live ComfyUI queue. Draggable by its header and resizable via the
- * corner handle; geometry persists in localStorage. Renders null while closed
- * (the overlay layer is click-through, so nothing blocks the app underneath).
+ * with four tabs — workflow library management, generated asset preview, the
+ * live ComfyUI queue, and the local model library. Draggable by its header and
+ * resizable via the corner handle; geometry persists in localStorage. Renders
+ * null while closed (the overlay layer is click-through, so nothing blocks the
+ * app underneath).
  */
 import { Component, createElement as h, useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { getJson, getList, postJson, postRaw } from './api.ts'
@@ -104,6 +105,10 @@ export interface ComfyUIPanelProps {
 export interface ComfyUIPanelViewProps extends ComfyUIPanelProps {
   /** Mounted inside a detached OS window: no viewport anchoring, no dragging. */
   detached?: boolean
+  /** The host refused a real OS window: render the same panel as an in-app
+   * floating surface (centered and enlarged) so the ⧉ click still has a
+   * visible, usable result. */
+  floating?: boolean
   /** Transient one-line notice above the tabs (e.g. the popup was refused). */
   notice?: string
   /** Move the panel between the app viewport and a detached window. */
@@ -132,6 +137,36 @@ interface WorkflowEntry {
   /** Whether the agent must read the pack before running this workflow. */
   requireSkill?: boolean
   updatedAt: string
+}
+
+/** One model file found under a configured ComfyUI directory. */
+interface ModelEntry {
+  id: string
+  name: string
+  file: string
+  relativePath: string
+  type: string
+  format: string
+  size: number
+  modifiedAt: string
+  preview?: string
+  previewKind?: 'image' | 'video'
+}
+
+interface ModelGroup {
+  type: string
+  models: ModelEntry[]
+}
+
+interface ModelLibrary {
+  ok?: boolean
+  error?: string
+  roots: string[]
+  groups: ModelGroup[]
+  total: number
+  previewCount: number
+  warnings: string[]
+  scannedAt: string
 }
 
 /** One file inside a workflow's skill pack. */
@@ -1098,6 +1133,7 @@ function formatBytes(bytes: number | undefined): string {
 export function ComfyUIPanelView({
   t,
   detached = false,
+  floating = false,
   notice = '',
   onToggleDetached,
 }: ComfyUIPanelViewProps): ReturnType<typeof h> | null {
@@ -1108,6 +1144,10 @@ export function ComfyUIPanelView({
   const [lightbox, setLightbox] = useState<{ images: string[]; kinds: Array<'image' | 'video' | 'audio' | 'other'>; index: number } | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number; width: number; height: number } | null>(null)
+  /** Geometry to restore when the in-app floating fallback ends. */
+  const dockedGeomRef = useRef<PanelGeom | null>(null)
+  const geomRef = useRef(geom)
+  geomRef.current = geom
 
   const openPreview = (images: string[], kinds: Array<'image' | 'video' | 'audio' | 'other'>, index: number): void => setLightbox({ images, kinds, index })
 
@@ -1131,6 +1171,32 @@ export function ComfyUIPanelView({
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [open])
+
+  // In-app floating mode is the fallback when the host refuses a real OS
+  // window (the DSH desktop app denies every window.open, and Electron's
+  // Document PiP never yields a usable window). Centering and enlarging the
+  // panel makes the ⧉ click visibly do something; ⇲ restores the user's
+  // docked geometry instead of overwriting it.
+  useEffect(() => {
+    if (floating) {
+      if (dockedGeomRef.current === null) dockedGeomRef.current = geomRef.current
+      const width = Math.round(Math.min(760, Math.max(360, window.innerWidth - 48)))
+      const height = Math.round(Math.min(900, Math.max(420, window.innerHeight - 48)))
+      const pos = clampPos(
+        Math.round((window.innerWidth - width) / 2),
+        Math.round((window.innerHeight - height) / 2),
+        width,
+        window.innerWidth,
+        window.innerHeight,
+      )
+      setGeom({ width, height, x: pos.x, y: pos.y })
+      return
+    }
+    if (dockedGeomRef.current !== null) {
+      setGeom(dockedGeomRef.current)
+      dockedGeomRef.current = null
+    }
+  }, [floating])
 
   const startDrag = (event: PointerEventLike, mode: 'move' | 'resize'): void => {
     // Inside a detached window the OS owns the geometry: dragging is done by the
@@ -1184,6 +1250,7 @@ export function ComfyUIPanelView({
 
   if (!open) return null
 
+  const expanded = detached || floating
   const panelStyle: Record<string, string> = {}
   if (!detached && geom.x !== undefined && geom.y !== undefined) {
     panelStyle.left = `${geom.x}px`
@@ -1197,7 +1264,7 @@ export function ComfyUIPanelView({
   return h('div',
     {
       ref: panelRef,
-      className: `dsc-panel${detached ? ' dsc-panel--detached' : ''}${dragging !== null ? ' dsc-panel--dragging' : ''}`,
+      className: `dsc-panel${detached ? ' dsc-panel--detached' : ''}${floating ? ' dsc-panel--floating' : ''}${dragging !== null ? ' dsc-panel--dragging' : ''}`,
       style: panelStyle,
     },
     h('div', {
@@ -1215,10 +1282,10 @@ export function ComfyUIPanelView({
         h('button', {
           className: 'dsc-panel-float',
           type: 'button',
-          title: detached ? t('panelDock') : t('panelFloat'),
-          'aria-label': detached ? t('panelDock') : t('panelFloat'),
+          title: expanded ? t('panelDock') : t('panelFloat'),
+          'aria-label': expanded ? t('panelDock') : t('panelFloat'),
           onClick: () => { onToggleDetached?.() },
-        }, detached ? '\u21f2' : '\u29c9'),
+        }, expanded ? '\u21f2' : '\u29c9'),
         h('button', {
           className: 'dsc-panel-reset',
           type: 'button',
@@ -1247,13 +1314,15 @@ export function ComfyUIPanelView({
       h(TabButton, { t, active: tab === 'workflows', label: t('tabWorkflows'), onClick: () => panelStore.setTab('workflows') }),
       h(TabButton, { t, active: tab === 'assets', label: t('tabAssets'), onClick: () => panelStore.setTab('assets') }),
       h(TabButton, { t, active: tab === 'queue', label: t('tabQueue'), onClick: () => panelStore.setTab('queue') }),
+      h(TabButton, { t, active: tab === 'library', label: t('tabLibrary'), onClick: () => panelStore.setTab('library') }),
     ),
     h('div', { className: 'dsc-panel-body' },
       // Keyed by tab: switching tabs gives a crashed tab a fresh attempt.
       h(TabBoundary, { key: tab, t },
         tab === 'workflows' ? h(WorkflowsTab, { t })
           : tab === 'assets' ? h(AssetsTab, { t, onPreview: openPreview })
-            : h(QueueTab, { t, onPreview: openPreview }),
+            : tab === 'library' ? h(LibraryTab, { t, onPreview: openPreview })
+              : h(QueueTab, { t, onPreview: openPreview }),
       ),
     ),
     lightbox !== null ? h(Lightbox, {
@@ -1285,6 +1354,7 @@ export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | n
   const open = usePanelOpen()
   const session = useSyncExternalStore(subscribeDetached, getDetachedSession, getDetachedSession)
   const [notice, setNotice] = useState('')
+  const [floating, setFloating] = useState(false)
   // The detached root renders once per session; keep it on the current `t`
   // without re-rendering the window on every parent render.
   const tRef = useRef(t)
@@ -1305,23 +1375,46 @@ export function ComfyUIPanel({ t }: ComfyUIPanelProps): ReturnType<typeof h> | n
 
   useEffect(() => {
     // Closing the panel must not leave an orphan window behind.
-    if (!open) dockDetached()
+    if (!open) {
+      setFloating(false)
+      setNotice('')
+      dockDetached()
+    }
   }, [open])
 
   const toggleDetached = (): void => {
+    if (floating) {
+      setFloating(false)
+      setNotice('')
+      return
+    }
     if (session !== null) {
       dockDetached()
       return
     }
+    // Never leave the click silent: `attachDetached` bounds the PiP request,
+    // and this pre-notice covers the wait. On failure the view becomes an
+    // in-app floating panel (still draggable and resizable) instead of
+    // pretending the host can create an OS window.
+    setNotice(tRef.current('panelFloatOpening'))
     void attachDetached(tRef.current('panelTitle')).then((attached) => {
-      setNotice(attached === null ? tRef.current('panelFloatFailed') : '')
+      if (attached === null) {
+        setFloating(true)
+        setNotice(tRef.current('panelFloatFailed'))
+        return
+      }
+      setFloating(false)
+      setNotice('')
+    }).catch(() => {
+      setFloating(true)
+      setNotice(tRef.current('panelFloatFailed'))
     })
   }
 
   // While the panel lives in its own window the app viewport renders nothing:
   // the view below would otherwise stay visible in both places at once.
   if (session !== null) return null
-  return h(ComfyUIPanelView, { t, notice, onToggleDetached: toggleDetached })
+  return h(ComfyUIPanelView, { t, notice, floating, onToggleDetached: toggleDetached })
 }
 
 function TabButton(props: { t: ComfyUIPanelProps['t']; active: boolean; label: string; onClick: () => void }): ReturnType<typeof h> {
@@ -3190,6 +3283,198 @@ function WorkflowView(props: { t: ComfyUIPanelProps['t']; file: string; graph: R
       : h('ul', { className: 'dsc-node-list' }, nodes.map((node) => h('li', { key: String(node.id) }, `${String(node.id)} · ${String(node.type)}`))),
     h('div', { className: 'dsc-view-label' }, props.t('wfViewJson')),
     h('textarea', { className: 'dsc-textarea dsc-textarea--json dsc-textarea--view', readOnly: true, value: json }),
+  )
+}
+
+/** Human labels for the model folders ComfyUI loaders use. */
+const MODEL_TYPE_LABELS: Record<string, string> = {
+  checkpoints: 'Checkpoint',
+  loras: 'LoRA',
+  lora: 'LoRA',
+  vae: 'VAE',
+  clip: 'CLIP',
+  text_encoders: 'Text Encoder',
+  clip_vision: 'CLIP Vision',
+  controlnet: 'ControlNet',
+  t2i_adapter: 'T2I Adapter',
+  unet: 'UNet',
+  diffusion_models: 'Diffusion Model',
+  embeddings: 'Embedding',
+  upscale_models: 'Upscale',
+  hypernetworks: 'Hypernetwork',
+  gligen: 'GLIGEN',
+  photomaker: 'PhotoMaker',
+  style_models: 'Style Model',
+  model_patches: 'Model Patch',
+  facerestore_models: 'Face Restore',
+  sams: 'SAM',
+  ultralytics: 'Ultralytics',
+  other: 'Other',
+}
+
+function modelTypeLabel(type: string): string {
+  const known = MODEL_TYPE_LABELS[type]
+  if (known !== undefined) return known
+  return type.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
+}
+
+/** One model tile: thumbnail when a sibling preview exists, metadata otherwise. */
+function ModelCard({ t, model, onOpen }: { t: ComfyUIPanelProps['t']; model: ModelEntry; onOpen: () => void }): ReturnType<typeof h> {
+  const [broken, setBroken] = useState(false)
+  const hasPreview = model.preview !== undefined && !broken
+  return h('button', {
+    type: 'button',
+    className: hasPreview ? 'dsc-model' : 'dsc-model dsc-model--no-preview',
+    title: model.relativePath,
+    onClick: onOpen,
+  },
+    hasPreview
+      ? model.previewKind === 'video'
+        ? h('video', {
+            className: 'dsc-model-thumb',
+            src: model.preview,
+            muted: true,
+            playsInline: true,
+            preload: 'metadata',
+            onError: () => setBroken(true),
+          })
+        : h('img', {
+            className: 'dsc-model-thumb',
+            src: model.preview,
+            alt: model.name,
+            loading: 'lazy',
+            onError: () => setBroken(true),
+          })
+      : h('div', { className: 'dsc-model-thumb dsc-model-placeholder' },
+          h('span', { className: 'dsc-model-ext' }, model.format.toUpperCase()),
+          h('span', null, t('modelNoPreview')),
+        ),
+    h('div', { className: 'dsc-model-name' }, model.name),
+    h('div', { className: 'dsc-model-meta' }, `${model.format.toUpperCase()} · ${formatBytes(model.size)}`),
+    h('div', { className: 'dsc-model-path' }, model.relativePath),
+  )
+}
+
+/** Tab 4: local model library grouped by the models/<type> folder on disk. */
+function LibraryTab({ t, onPreview }: { t: ComfyUIPanelProps['t']; onPreview: (images: string[], kinds: Array<'image' | 'video' | 'audio' | 'other'>, index: number) => void }): ReturnType<typeof h> {
+  const [library, setLibrary] = useState<ModelLibrary | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [search, setSearch] = useState('')
+  const [type, setType] = useState('')
+  const [relRefreshing, setRelRefreshing] = useState(false)
+
+  const load = useCallback(async (refresh: boolean): Promise<void> => {
+    setLoading(true)
+    try {
+      const data = await getJson<ModelLibrary>(`/comfyui/models${refresh ? '?refresh=1' : ''}`)
+      if (data.ok === false) throw new Error(data.error ?? 'model scan failed')
+      setLibrary(data)
+      setError(null)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void load(false)
+  }, [load])
+
+  const refresh = (): void => {
+    setRelRefreshing(true)
+    void load(true).finally(() => setRelRefreshing(false))
+  }
+
+  if (library === null) {
+    if (error !== null) {
+      return h('div', null,
+        h(ErrorNote, { t, message: error }),
+        h('div', { className: 'dsc-toolbar' },
+          h('button', { className: 'dsc-btn', disabled: loading, onClick: () => { void load(false) } }, t('refresh')),
+        ),
+      )
+    }
+    return h('div', { className: 'dsc-meta' }, loading ? '…' : '')
+  }
+
+  const query = search.trim().toLowerCase()
+  const groups = library.groups
+    .filter((group) => type === '' || group.type === type)
+    .map((group) => ({
+      ...group,
+      models: group.models.filter((model) => query === '' || model.name.toLowerCase().includes(query) || model.relativePath.toLowerCase().includes(query)),
+    }))
+    .filter((group) => group.models.length > 0)
+  const visible = groups.flatMap((group) => group.models)
+  const withPreview = visible.filter((model) => model.preview !== undefined)
+  const rootsLabel = library.roots.length > 3
+    ? `${library.roots.slice(0, 3).join(' · ')} +${library.roots.length - 3}`
+    : library.roots.join(' · ')
+
+  const openModel = (model: ModelEntry): void => {
+    const index = withPreview.findIndex((candidate) => candidate.id === model.id)
+    if (index < 0) return
+    const urls: string[] = []
+    const kinds: Array<'image' | 'video'> = []
+    for (const candidate of withPreview) {
+      if (candidate.preview !== undefined) {
+        urls.push(candidate.preview)
+        kinds.push(candidate.previewKind ?? 'image')
+      }
+    }
+    onPreview(urls, kinds, index)
+  }
+
+  return h('div', null,
+    h('div', { className: 'dsc-toolbar' },
+      h('input', {
+        className: 'dsc-input dsc-input--inline dsc-model-search',
+        value: search,
+        placeholder: t('modelSearch'),
+        onChange: (event: { target: { value: string } }) => setSearch(event.target.value),
+      }),
+      h('select', {
+        className: 'dsc-input dsc-input--inline',
+        value: type,
+        onChange: (event: { target: { value: string } }) => setType(event.target.value),
+      },
+        h('option', { value: '' }, t('modelTypeAll')),
+        library.groups.map((group) => h('option', { key: group.type, value: group.type }, `${modelTypeLabel(group.type)} (${group.models.length})`)),
+      ),
+      h('button', { className: 'dsc-btn', disabled: loading || relRefreshing, onClick: refresh }, t('refresh')),
+    ),
+    library.roots.length > 0
+      ? h('div', { className: 'dsc-hint dsc-model-roots', title: library.roots.join('\n') }, `${t('modelRoots')}: ${rootsLabel}`)
+      : null,
+    library.total > 0
+      ? h('div', { className: 'dsc-hint' }, t('modelSummary', { models: library.total, types: library.groups.length, previews: library.previewCount }))
+      : null,
+    error !== null ? h(ErrorNote, { t, message: error }) : null,
+    library.warnings.length > 0
+      ? h('div', { className: 'dsc-hint dsc-hint--warn' }, `${t('modelWarnings')}: ${library.warnings.join('；')}`)
+      : null,
+    library.roots.length === 0
+      ? h('div', null,
+          h('div', { className: 'dsc-meta' }, t('modelNoRoot')),
+          h('div', { className: 'dsc-hint' }, t('modelNoRootHint')),
+        )
+      : library.total === 0
+        ? h('div', { className: 'dsc-meta' }, t('modelNoModels'))
+        : visible.length === 0
+          ? h('div', { className: 'dsc-meta' }, t('modelNoMatch'))
+          : groups.map((group) => h('details', { key: group.type, className: 'dsc-fold', open: true },
+              h('summary', null, `${modelTypeLabel(group.type)} (${group.models.length})`),
+              h('div', { className: 'dsc-fold-body' },
+                h('div', { className: 'dsc-models-grid' }, group.models.map((model) => h(ModelCard, {
+                  key: model.id,
+                  t,
+                  model,
+                  onOpen: () => openModel(model),
+                }))),
+              ),
+            )),
   )
 }
 

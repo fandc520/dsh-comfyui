@@ -3,15 +3,18 @@
  * feedback when ComfyUI was down: the workflows/queue tabs just stayed empty
  * with no explanation. The header trigger now fires a real backend probe
  * (POST /comfyui/test → the host connects to the configured ComfyUI server —
- * local port or remote URL alike); when it fails, the panel closes again —
- * the trigger must not stay highlighted against a dead backend — and a fixed
- * toast at the top of the page tells the user to start ComfyUI or fix the
- * server address. The probe never blocks the panel: it opens immediately,
- * the toast settles whenever the probe answers.
+ * local port or remote URL alike); when it fails, a fixed toast at the top of
+ * the page tells the user to start ComfyUI or fix the server address.
+ *
+ * A failed probe must NOT close the panel: the workflow library, skill packs
+ * and preset import/export live in the plugin's own store and work offline, so
+ * taking the panel away on failure made a perfectly usable click look dead
+ * (the reported bug). Only the ComfyUI-backed tabs (assets/queue) stay empty,
+ * and the toast is the reminder for that. The probe never blocks the panel:
+ * it opens immediately, the toast settles whenever the probe answers.
  */
 import { createElement as h, useSyncExternalStore } from 'react'
 import { postJson } from './api.ts'
-import { panelStore } from './panel-store.ts'
 
 export interface ConnectionToastProps {
   t: (key: string, ...rest: unknown[]) => string
@@ -98,15 +101,14 @@ export function probeConnection(): Promise<void> {
       } else {
         hadFailure = true
         setState({ status: 'fail', message: payload.error ?? 'unknown error' })
-        // The panel this click opened has nothing to show (dead tabs only) —
-        // close it so the trigger does not stay highlighted against a dead
-        // backend. The toast stays up as the actual reminder.
-        panelStore.close()
+        // Keep the panel open: the local workflow library still works offline,
+        // and closing here made the click look like it did nothing. The sticky
+        // toast is the reminder instead.
       }
     } catch (error) {
       hadFailure = true
       setState({ status: 'fail', message: error instanceof Error ? error.message : String(error) })
-      panelStore.close()
+      // Same as above: a dead backend must not take the panel away.
     } finally {
       inFlight = null
     }

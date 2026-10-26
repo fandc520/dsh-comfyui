@@ -14,7 +14,7 @@ function emit(): void {
   for (const listener of listeners) listener()
 }
 
-export type PanelTab = 'workflows' | 'assets' | 'queue'
+export type PanelTab = 'workflows' | 'assets' | 'queue' | 'library'
 
 export const panelStore = {
   isOpen: () => open,

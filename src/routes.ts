@@ -13,6 +13,7 @@ import { collectMedia, historyErrorMessage, mediaProxyUrl, type ComfyUIMediaRef 
 import type { AssetRecord } from './store.js'
 import { MAX_ASSET_BYTES, SKILL_MAIN, SKILL_PRESET_DIRS, joinFrontmatter, splitFrontmatter } from './skillpack.js'
 import { MAX_IMPORT_BYTES, analyzeImportPackage, applyImportPackage, buildExportPackage } from './transfer.js'
+import { resolveModelPreview, scanModelLibrary, streamModelPreview } from './models.js'
 import { unlink } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
@@ -322,6 +323,60 @@ export function mountComfyUIRoutes(ctx: Context, runtime: ComfyUIRuntime): (() =
         return
       }
       sendJson(response, 405, { error: 'method not allowed' })
+    }),
+  }))
+
+  // Local model library: pure filesystem scan, so the tab works with no
+  // ComfyUI server reachable (the panel may be opened offline on purpose).
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/comfyui/models',
+    handler: withHint(async (request, response) => {
+      if (!methodIs(request, 'GET')) {
+        sendJson(response, 405, { error: 'method not allowed' })
+        return
+      }
+      try {
+        const refresh = new URL(request.url ?? '/', 'http://localhost').searchParams.get('refresh') === '1'
+        const library = await scanModelLibrary(runtime.getConfig().comfyuiDirs, refresh)
+        sendJson(response, 200, { ok: true, ...library })
+      } catch (error) {
+        sendJson(response, 200, {
+          ok: false,
+          error: errorMessage(error),
+          roots: [],
+          groups: [],
+          total: 0,
+          previewCount: 0,
+          warnings: [],
+          scannedAt: new Date().toISOString(),
+        })
+      }
+    }),
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/comfyui/models/preview',
+    handler: withHint(async (request, response) => {
+      if (!methodIs(request, 'GET') && !methodIs(request, 'HEAD')) {
+        sendJson(response, 405, { error: 'method not allowed' })
+        return
+      }
+      const url = new URL(request.url ?? '/', 'http://localhost')
+      const root = url.searchParams.get('root') ?? ''
+      const file = url.searchParams.get('file') ?? ''
+      const target = await resolveModelPreview(runtime.getConfig().comfyuiDirs, root, file)
+      if (target === null) {
+        sendJson(response, 404, { error: 'preview not found' })
+        return
+      }
+      try {
+        await streamModelPreview(target, request.method ?? 'GET', response)
+      } catch {
+        if (!response.headersSent) sendJson(response, 404, { error: 'preview not found' })
+        else response.end()
+      }
     }),
   }))
 

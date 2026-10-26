@@ -11,19 +11,24 @@
  * document, and the panel behaves exactly as it does inside the app.
  *
  * Two channels, tried in order:
- * 1. `window.open` under a fixed frame name — a real OS window. The desktop host
- *    whitelists exactly this name in its windowOpenHandler (desktop-side patch);
- *    elsewhere a browser only gets here when popups are allowed.
+ * 1. `window.open` under a fixed frame name — a real OS window. A host that
+ *    whitelists this name in its windowOpenHandler (desktop-side patch) gets a
+ *    real window; elsewhere a browser only gets here when popups are allowed.
+ *    The installed DSH desktop app 0.2.1-rc.3 (Electron 44) denies every
+ *    `window.open` and ships no such whitelist, so in that host both channels
+ *    fail and `panel.tsx` falls back to an in-app floating panel.
  * 2. Document Picture-in-Picture — an always-on-top mini window. Chromium builds
  *    without a native PiP window implementation (Electron 44) resolve
  *    `requestWindow` and then tear the window down within ~200ms, so the result
- *    is only trusted after a liveness check.
+ *    is only trusted after a liveness check. Some builds never settle the
+ *    promise at all; those are the desktop shell, detected and skipped up front
+ *    so a normal browser keeps the original unbounded await.
  */
 import type { ReactElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { DETACHED_DOCUMENT_CSS } from './styles.ts'
 
-/** Frame name the desktop host's windowOpenHandler whitelists. */
+/** Frame name a desktop host patch would have to whitelist. */
 export const DETACHED_WINDOW_NAME = 'dsh-comfyui-panel'
 
 /** Id of the mount point created inside the detached document. */
@@ -184,25 +189,20 @@ async function openPictureInPicture(title: string): Promise<DetachedSession | nu
   const api = pictureInPictureApi()
   if (api === null) return null
   const { width, height } = detachedWindowSize()
-  let win: Window
-  try {
-    win = await api.requestWindow({ width, height })
-  } catch {
-    return null
-  }
+  // Unbounded on purpose: this is the original browser behaviour, and a slow
+  // hand-over must not be turned into a failure (that would close a window the
+  // user was about to get). The desktop shell never reaches this function —
+  // `attachDetached` detects it first — so the only host that can hang here is
+  // one with no usable PiP implementation at all.
+  const win = await api.requestWindow({ width, height }).catch(() => null)
+  if (win === null) return null
   if (win.closed) return null
   let container: HTMLElement
   try {
     watchWindow(win)
     container = prepareDocument(win, title)
   } catch {
-    return null
-  }
-  // Electron 44 accepts the request and destroys the window moments later: a
-  // document with no layout or a closed window means this build has no real PiP
-  // window, and the caller should fall back to "stay in the app viewport".
-  await delay(PIP_SETTLE_MS)
-  if (win.closed || win.document.documentElement.clientWidth <= 0) {
+    // Cross-origin or a document we cannot mount into: drop the window.
     try {
       win.close()
     } catch {
@@ -210,7 +210,35 @@ async function openPictureInPicture(title: string): Promise<DetachedSession | nu
     }
     return null
   }
+  // Electron 44 accepts the request and destroys the window moments later: a
+  // document with no layout or a closed window means this build has no real PiP
+  // window, and the caller should fall back to "stay in the app viewport".
+  await delay(PIP_SETTLE_MS)
+  try {
+    if (win.closed || win.document.documentElement.clientWidth <= 0) {
+      try {
+        win.close()
+      } catch {
+        // already gone
+      }
+      return null
+    }
+  } catch {
+    return null
+  }
   return { win, container, kind: 'pip' }
+}
+
+/** True inside the DSH desktop shell. Its windowOpenHandler denies every
+ * `window.open`, and that Electron build tears a Document PiP window down
+ * within ~200ms (while sometimes never settling the request). Skipping the PiP
+ * channel here both avoids a wait that cannot produce a window and keeps the
+ * ordinary browser path exactly as it was. */
+function isDesktopShell(): boolean {
+  const desktop = (window as unknown as { dshDesktop?: unknown }).dshDesktop
+  return desktop !== undefined
+    || window.location.protocol === 'dsh-app:'
+    || navigator.userAgent.includes('Electron')
 }
 
 /** Move the panel into its own window. Resolves null when the environment
@@ -222,7 +250,15 @@ export async function attachDetached(title: string): Promise<DetachedSession | n
     setSession(popup)
     return popup
   }
-  const pip = await openPictureInPicture(title)
+  if (isDesktopShell()) return null
+  let pip: DetachedSession | null = null
+  try {
+    pip = await openPictureInPicture(title)
+  } catch {
+    // A host that throws instead of reporting unavailability must not take the
+    // completion notice down with it.
+    pip = null
+  }
   if (pip !== null) {
     setSession(pip)
     return pip

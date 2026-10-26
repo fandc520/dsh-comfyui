@@ -114,6 +114,18 @@ select.dsc-input option { background: var(--dsw-alias-bg-layer-1); color: var(--
   user-select: none;
 }
 .dsc-panel--dragging { cursor: grabbing; }
+/* In-app floating fallback: the host refused a real OS window (DSH desktop
+   denies every window.open), so the panel centers and enlarges instead of
+   silently doing nothing. Geometry still comes from the inline style, which
+   keeps dragging and resizing working exactly as in docked mode. */
+.dsc-panel--floating {
+  max-width: calc(100vw - 24px);
+  min-width: 320px;
+  z-index: 950;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42), 0 4px 16px rgba(0, 0, 0, 0.2);
+  border-color: var(--dsw-alias-border-l2);
+}
+.dsc-panel--floating .dsc-panel-notice { color: var(--dsw-alias-label-primary); }
 .dsc-panel-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--dsw-alias-border-l1); cursor: grab; touch-action: none; }
 .dsc-panel--dragging .dsc-panel-head { cursor: grabbing; }
 .dsc-panel-resize {
@@ -243,6 +255,28 @@ select.dsc-input option { background: var(--dsw-alias-bg-layer-1); color: var(--
 /* Second meta line: the output filename, under the workflow name. */
 .dsc-asset-file { padding-top: 0; font-size: 10px; opacity: 0.8; }
 .dsc-asset--empty .dsc-asset-file { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+/* --- library tab --- */
+.dsc-model-search { min-width: 140px; flex: 1; }
+.dsc-model-roots { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dsc-hint--warn { color: var(--dsw-alias-state-warn-primary); }
+.dsc-models-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 8px; }
+.dsc-model {
+  display: flex; flex-direction: column; min-width: 0; padding: 0; text-align: left;
+  border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; overflow: hidden;
+  background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary);
+  font: inherit; cursor: pointer;
+}
+.dsc-model:hover { border-color: var(--dsw-alias-border-l2); }
+.dsc-model-thumb { width: 100%; height: 120px; object-fit: cover; display: block; background: #000; }
+.dsc-model-placeholder {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  box-sizing: border-box; padding: 8px; background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-secondary); font-size: 11px; text-align: center;
+}
+.dsc-model-ext { font-weight: 600; font-size: 12px; color: var(--dsw-alias-label-primary); }
+.dsc-model-name { padding: 5px 7px 0; font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; box-sizing: border-box; }
+.dsc-model-meta { padding: 1px 7px 0; font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.dsc-model-path { padding: 1px 7px 6px; font-size: 10px; color: var(--dsw-alias-label-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; box-sizing: border-box; }
 /* confirmation modal (asset deletion) */
 .dsc-confirm { width: min(360px, 88vw); display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; border-radius: 12px; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.32); }
 .dsc-confirm-title { font-weight: 600; font-size: 14px; }

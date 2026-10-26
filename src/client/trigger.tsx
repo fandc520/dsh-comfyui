@@ -28,7 +28,8 @@ export function ComfyUIIcon(): ReturnType<typeof h> {
 
 /** Header-action button toggling the ComfyUI panel. Opening it also fires a
  * backend connectivity probe: when ComfyUI is down, a reminder toast explains
- * why the panel stays empty instead of the click appearing to do nothing. */
+ * which tabs are empty, while the panel itself still opens (its workflow
+ * library is local and works offline). */
 export function ComfyUITrigger({ t }: ComfyUITriggerProps): ReturnType<typeof h> {
   const open = usePanelOpen()
   return h(Fragment, null,
