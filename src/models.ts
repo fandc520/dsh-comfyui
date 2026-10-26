@@ -1,13 +1,26 @@
 /**
- * Local model library: scans the ComfyUI installation directories the user
- * configured (`comfyuiDirs`) and groups model files by the models/<type>
- * directory they live in. Each install can also share models through
- * `extra_model_paths.yaml`; those paths are merged in with the category name
- * as the group type, so a shared `D:\models\ckpt` folder still shows up as
- * Checkpoint. This is deliberately filesystem-only: the panel must list models
- * even when no ComfyUI server is running (and on this machine none is
- * installed). Preview images are ordinary sibling files, served through a
- * same-origin route so the browser never reads arbitrary paths.
+ * Local model library: lists every model file the local ComfyUI can actually
+ * load, grouped by the `models/<type>` folder the file belongs to.
+ *
+ * Sources of scan roots, in order:
+ *  1. the directories configured in `comfyuiDirs`, expanded for the layouts a
+ *     real install uses (a ComfyUI install root, a bare `models` folder, one
+ *     category folder, or the ComfyUI-Desktop tree with ComfyUI-Shared /
+ *     ComfyUI-Installs);
+ *  2. the running ComfyUI server's own folder list
+ *     (`GET /experiment/models`), which is the only way to see models that live
+ *     outside the install: SD-WebUI style `models/Lora`, a second drive, an
+ *     `extra_model_paths.yaml` the user never told us about. This is requested
+ *     with a short timeout and silently skipped when the server is offline;
+ *  3. `extra_model_paths.yaml` / `.yml` next to a configured directory, for the
+ *     offline case.
+ *
+ * The directory name decides the category, not the position: `models/Lora`,
+ * `models/loras` and `models/Lora/loras` all end up as LoRA, and ComfyUI's own
+ * `text_encoders` / SD-WebUI's `CLIP` both map to Text Encoder. Preview images
+ * are ordinary sibling files (`<model>.png`, `<model>.preview.png`,
+ * `previews/<model>.png`) served through a same-origin route, so the browser
+ * never reads arbitrary paths.
  */
 import { createReadStream, type Dirent, type Stats } from 'node:fs'
 import { readdir, readFile, realpath, stat } from 'node:fs/promises'
@@ -20,17 +33,32 @@ export const MODEL_EXTENSIONS = new Set([
   '.safetensors', '.ckpt', '.pt', '.pth', '.bin', '.gguf', '.onnx', '.pkl',
 ])
 
+/** Files every ComfyUI models folder ships with; never models. */
+const PLACEHOLDER_PATTERN = /^put_.*_here$/i
+
+/** ComfyUI-Desktop metadata sidecar (`<name>.metadata.json`). */
+const SIDECAR_SUFFIX = '.metadata.json'
+const SIDECAR_MAX_BYTES = 256 * 1024
+/** Archive provenance written next to a weights file (`<file>.civarchive.json`). */
+const ARCHIVE_META_SUFFIX = '.civarchive.json'
+
 /** Preview candidates tried next to a model file. */
-const IMAGE_PREVIEW_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.gif']
+const IMAGE_PREVIEW_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.avif']
 const VIDEO_PREVIEW_EXTENSIONS = ['.mp4', '.webm']
 const PREVIEW_EXTENSIONS = new Set([...IMAGE_PREVIEW_EXTENSIONS, ...VIDEO_PREVIEW_EXTENSIONS])
 
 /** Directories that never contain user models but can be huge. */
-const SKIP_DIRS = new Set(['.git', 'node_modules', '__pycache__', '.cache', '.venv', 'venv', 'env'])
+const SKIP_DIRS = new Set([
+  '.git', 'node_modules', '__pycache__', '.cache', '.venv', 'venv', 'env', '.pytest_cache',
+  '.mypy_cache', '.disabled', 'custom_nodes', 'web', 'input', 'output', 'user', 'tests',
+  'site-packages',
+])
 
-const MAX_SCAN_ENTRIES = 20_000
-const MAX_DEPTH = 8
-const CACHE_TTL_MS = 15_000
+const MAX_SCAN_ENTRIES = 30_000
+const MAX_DEPTH = 6
+const CACHE_TTL_MS = 30_000
+const MAX_WARNINGS = 12
+const SERVER_TIMEOUT_MS = 4_000
 
 /** ComfyUI's shared-model configuration, tried in this order. */
 const EXTRA_CONFIG_NAMES = ['extra_model_paths.yaml', 'extra_model_paths.yml']
@@ -39,11 +67,74 @@ const EXTRA_CONFIG_NON_MODEL_KEYS = new Set(['base_path', 'is_default', 'custom_
 
 /** Display order for the common ComfyUI model folders; unknown folders follow. */
 export const MODEL_TYPE_ORDER = [
-  'checkpoints', 'loras', 'lora', 'vae', 'clip', 'text_encoders', 'clip_vision',
-  'controlnet', 't2i_adapter', 'unet', 'diffusion_models', 'embeddings',
-  'upscale_models', 'hypernetworks', 'gligen', 'photomaker', 'style_models',
-  'model_patches', 'pulid', 'facerestore_models', 'sams', 'ultralytics',
+  'checkpoints', 'loras', 'diffusion_models', 'vae', 'vae_approx', 'text_encoders', 'clip',
+  'clip_vision', 'controlnet', 't2i_adapter', 'style_models', 'ipadapter', 'embeddings',
+  'upscale_models', 'hypernetworks', 'gligen', 'photomaker', 'model_patches', 'pulid',
+  'facerestore_models', 'sams', 'ultralytics', 'detection', 'audio_encoders',
+  'background_removal', 'frame_interpolation', 'geometry_estimation', 'latent_upscale_models',
+  'optical_flow', 'diffusers', 'onnx', 'classifiers',
 ]
+
+/**
+ * Directory-name aliases. ComfyUI, ComfyUI-Desktop, SD-WebUI and A1111 all use
+ * slightly different names for the same category, and users create their own
+ * ones (`SDXL`, `Lora`, `upscale`); anything not listed keeps its own name.
+ */
+const TYPE_ALIASES: Array<[alias: string, type: string]> = [
+  ['checkpoints', 'checkpoints'], ['checkpoint', 'checkpoints'], ['ckpt', 'checkpoints'],
+  ['stable-diffusion', 'checkpoints'], ['stablediffusion', 'checkpoints'],
+  ['loras', 'loras'], ['lora', 'loras'], ['lycoris', 'loras'], ['locon', 'loras'],
+  ['diffusion_models', 'diffusion_models'], ['diffusion-models', 'diffusion_models'],
+  ['diffusionmodels', 'diffusion_models'], ['unet', 'diffusion_models'], ['unets', 'diffusion_models'],
+  ['vae', 'vae'], ['vaes', 'vae'],
+  ['vae_approx', 'vae_approx'], ['vae-approx', 'vae_approx'], ['vaeapprox', 'vae_approx'],
+  ['text_encoders', 'text_encoders'], ['text-encoders', 'text_encoders'], ['textencoders', 'text_encoders'],
+  ['text_encoder', 'text_encoders'], ['clip', 'text_encoders'], ['clip_model', 'text_encoders'],
+  ['t5', 'text_encoders'], ['llm', 'text_encoders'],
+  ['clip_vision', 'clip_vision'], ['clip-vision', 'clip_vision'], ['clipvision', 'clip_vision'],
+  ['controlnet', 'controlnet'], ['control-nets', 'controlnet'], ['control-nets-models', 'controlnet'],
+  ['lllite', 'controlnet'], ['t2i_adapter', 't2i_adapter'], ['t2i-adapter', 't2i_adapter'], ['t2iadapter', 't2i_adapter'],
+  ['style_models', 'style_models'], ['style-models', 'style_models'], ['stylemodels', 'style_models'],
+  ['ipadapter', 'ipadapter'], ['ip-adapter', 'ipadapter'], ['ip_adapter', 'ipadapter'],
+  ['embeddings', 'embeddings'], ['embedding', 'embeddings'], ['textual_inversion', 'embeddings'],
+  ['upscale_models', 'upscale_models'], ['upscale-models', 'upscale_models'], ['upscalers', 'upscale_models'],
+  ['esrgan', 'upscale_models'], ['real-esrgan', 'upscale_models'], ['realesrgan', 'upscale_models'],
+  ['swinir', 'upscale_models'], ['gfpgan', 'upscale_models'], ['codeformer', 'upscale_models'],
+  ['hypernetworks', 'hypernetworks'], ['hypernetwork', 'hypernetworks'],
+  ['gligen', 'gligen'], ['photomaker', 'photomaker'],
+  ['model_patches', 'model_patches'], ['model-patches', 'model_patches'], ['modelpatches', 'model_patches'],
+  ['pulid', 'pulid'],
+  ['facerestore_models', 'facerestore_models'], ['facerestore-models', 'facerestore_models'],
+  ['facerestore', 'facerestore_models'],
+  ['sams', 'sams'], ['sam', 'sams'], ['segment-anything', 'sams'],
+  ['ultralytics', 'ultralytics'], ['ultralytics_bbox', 'ultralytics'], ['ultralytics_segm', 'ultralytics'],
+  ['detection', 'detection'], ['adetailer', 'detection'], ['deepbooru', 'detection'], ['bbox', 'detection'],
+  ['audio_encoders', 'audio_encoders'], ['audio-encoders', 'audio_encoders'],
+  ['background_removal', 'background_removal'], ['background-removal', 'background_removal'],
+  ['frame_interpolation', 'frame_interpolation'], ['frame-interpolation', 'frame_interpolation'],
+  ['geometry_estimation', 'geometry_estimation'], ['geometry-estimation', 'geometry_estimation'],
+  ['latent_upscale_models', 'latent_upscale_models'], ['latent-upscale-models', 'latent_upscale_models'],
+  ['optical_flow', 'optical_flow'], ['optical-flow', 'optical_flow'],
+  ['diffusers', 'diffusers'], ['onnx', 'onnx'], ['classifiers', 'classifiers'],
+]
+
+function normalizeSegment(segment: string): string {
+  return segment.trim().toLowerCase().replace(/\s+/g, '-')
+}
+
+const TYPE_BY_SEGMENT = new Map<string, string>()
+for (const [alias, type] of TYPE_ALIASES) {
+  const key = normalizeSegment(alias)
+  TYPE_BY_SEGMENT.set(key, type)
+  // Underscore and dash are interchangeable in these names.
+  if (key.includes('_')) TYPE_BY_SEGMENT.set(key.replace(/_/g, '-'), type)
+  if (key.includes('-')) TYPE_BY_SEGMENT.set(key.replace(/-/g, '_'), type)
+}
+
+/** Canonical model type for one directory name, or undefined when unknown. */
+export function canonicalModelType(segment: string): string | undefined {
+  return TYPE_BY_SEGMENT.get(normalizeSegment(segment))
+}
 
 export interface ModelEntry {
   id: string
@@ -55,9 +146,18 @@ export interface ModelEntry {
   format: string
   size: number
   modifiedAt: string
-  /** Same-origin preview URL, or absent when no sibling preview exists. */
+  /** Absolute models folder this file was found under. */
+  root: string
+  /** Same-origin preview URL (or a remote URL from a model sidecar), absent when none. */
   preview?: string
   previewKind?: 'image' | 'video'
+  /** `file` = sibling image scanned on disk, `sidecar` = URL from <name>.metadata.json. */
+  previewSource?: 'file' | 'sidecar'
+  /**
+   * Cover is flagged NSFW by the archive it came from (`<file>.civarchive.json`);
+   * the panel blurs it until the user reveals it.
+   */
+  previewNsfw?: boolean
 }
 
 export interface ModelGroup {
@@ -72,11 +172,32 @@ export interface ModelLibrary {
   previewCount: number
   warnings: string[]
   scannedAt: string
+  /** Where each root came from; lets the panel explain what was scanned. */
+  sources: { config: number; server: number; yaml: number }
+  /** True when the running ComfyUI reported its folder list. */
+  serverUsed: boolean
 }
+
+export interface ScanOptions {
+  /** Configured ComfyUI directories (settings page / Loader config). */
+  roots: string[]
+  /** ComfyUI server base URL; used to ask for its authoritative folder list. */
+  baseUrl?: string
+  /** Optional bearer token for the server probe. */
+  apiKey?: string
+  /** Server probe timeout (ms). */
+  timeoutMs?: number
+  /** Ignore every cache and probe the server again. */
+  refresh?: boolean
+}
+
+type Origin = 'config' | 'server' | 'yaml'
 
 interface ScanRoot {
   path: string
+  /** Category pinned by configuration (extra_model_paths / server folder). */
   forcedType?: string
+  origin: Origin
 }
 
 interface CacheEntry {
@@ -99,7 +220,9 @@ interface YamlEntry {
 }
 
 const rootCache = new Map<string, CacheEntry>()
-const expandedRootsCache = new Map<string, { at: number; roots: ScanRoot[]; warnings: string[] }>()
+const expandedRootsCache = new Map<string, { at: number; roots: ScanRoot[]; warnings: string[]; serverUsed: boolean }>()
+/** Roots the last scan proved trustworthy; the preview route accepts these. */
+const trustedRoots = new Set<string>()
 
 async function directoryExists(path: string): Promise<boolean> {
   try {
@@ -107,22 +230,6 @@ async function directoryExists(path: string): Promise<boolean> {
   } catch {
     return false
   }
-}
-
-/**
- * Resolve one configured entry to the directory that actually contains model
- * category folders. Accepts a ComfyUI install root (`<root>/models`), a
- * `models` directory, or a single category directory such as
- * `models/checkpoints` (the latter pins the group type).
- */
-async function describeScanRoot(input: string): Promise<ScanRoot | null> {
-  const absolute = resolve(input)
-  if (!(await directoryExists(absolute))) return null
-  const nested = join(absolute, 'models')
-  if (await directoryExists(nested)) return { path: nested }
-  const base = basename(absolute).toLowerCase()
-  if (MODEL_TYPE_ORDER.includes(base)) return { path: absolute, forcedType: base }
-  return { path: absolute }
 }
 
 async function fileExists(path: string): Promise<boolean> {
@@ -133,6 +240,74 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
+async function listDirectories(path: string): Promise<string[]> {
+  try {
+    const entries = await readdir(path, { withFileTypes: true })
+    const dirs: string[] = []
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        dirs.push(join(path, entry.name))
+        continue
+      }
+      if (!entry.isSymbolicLink()) continue
+      const target = join(path, entry.name)
+      if (await directoryExists(target)) dirs.push(target)
+    }
+    return dirs.sort((a, b) => a.localeCompare(b))
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Expand one configured directory into models folders. Handles the four
+ * layouts users actually have: the ComfyUI-Desktop tree (`ComfyUI-Shared` and
+ * `ComfyUI-Installs/<install>/ComfyUI/models`), a ComfyUI install root, a bare
+ * `models` directory, and a single category directory.
+ */
+async function expandConfiguredDir(input: string, add: (root: ScanRoot) => void, warnings: string[]): Promise<void> {
+  const absolute = resolve(input)
+  if (!(await directoryExists(absolute))) {
+    warnings.push(`目录不存在：${absolute}`)
+    return
+  }
+
+  let foundLayout = false
+  const shared = join(absolute, 'ComfyUI-Shared', 'models')
+  if (await directoryExists(shared)) {
+    add({ path: shared, origin: 'config' })
+    foundLayout = true
+  }
+  const installs = join(absolute, 'ComfyUI-Installs')
+  if (await directoryExists(installs)) {
+    const listed = await listDirectories(installs)
+    for (const install of listed) {
+      for (const candidate of [join(install, 'ComfyUI', 'models'), join(install, 'models')]) {
+        if (await directoryExists(candidate)) {
+          add({ path: candidate, origin: 'config' })
+          foundLayout = true
+        }
+      }
+    }
+  }
+  if (foundLayout) return
+
+  const nested = join(absolute, 'models')
+  if (await directoryExists(nested)) {
+    add({ path: nested, origin: 'config' })
+    return
+  }
+
+  const forced = canonicalModelType(basename(absolute))
+  if (forced !== undefined) {
+    add({ path: absolute, forcedType: forced, origin: 'config' })
+    return
+  }
+
+  // A bare models folder (or a directory whose children are category folders).
+  add({ path: absolute, origin: 'config' })
+}
+
 /**
  * Locate `extra_model_paths.yaml` for a configured directory. A ComfyUI root
  * keeps it at the root; a `models` directory or a single category directory
@@ -141,10 +316,13 @@ async function fileExists(path: string): Promise<boolean> {
  */
 async function findExtraModelConfig(input: string): Promise<string | null> {
   const absolute = resolve(input)
-  const base = basename(absolute).toLowerCase()
+  const base = normalizeSegment(basename(absolute))
   const candidates = new Set<string>([absolute])
-  if (base === 'models') candidates.add(dirname(absolute))
-  if (MODEL_TYPE_ORDER.includes(base)) candidates.add(dirname(dirname(absolute)))
+  if (base === 'models') {
+    candidates.add(dirname(absolute))
+    candidates.add(dirname(dirname(absolute)))
+  }
+  if (canonicalModelType(base) !== undefined) candidates.add(dirname(dirname(absolute)))
   for (const dir of candidates) {
     for (const name of EXTRA_CONFIG_NAMES) {
       const candidate = join(dir, name)
@@ -311,64 +489,150 @@ async function extraRootsFor(config: ExtraModelConfig, warnings: string[]): Prom
         warnings.push(`共享目录不存在：${path}（来自 ${config.configPath}）`)
         continue
       }
-      roots.push({ path, forcedType: category.type })
+      roots.push({
+        path,
+        forcedType: canonicalModelType(category.type) ?? category.type.toLowerCase(),
+        origin: 'yaml',
+      })
     }
   }
   return roots
 }
 
-/**
- * Expand configured ComfyUI directories into concrete scan roots. Shared
- * model paths come first so that, when the same file is also inside the
- * install's own models folder, the category from extra_model_paths wins.
- */
-async function expandConfiguredRoots(configRoots: string[], refresh: boolean): Promise<{ roots: ScanRoot[]; warnings: string[] }> {
-  const inputs = configRoots.map((root) => root.trim()).filter((root) => root !== '')
-  const cacheKey = inputs.join('\0')
-  const cached = expandedRootsCache.get(cacheKey)
-  if (!refresh && cached !== undefined && Date.now() - cached.at < CACHE_TTL_MS) {
-    return { roots: cached.roots, warnings: cached.warnings }
-  }
-
-  const roots: ScanRoot[] = []
-  const warnings: string[] = []
-  const seen = new Set<string>()
-  const add = (root: ScanRoot): void => {
-    const key = `${root.path}\0${root.forcedType ?? ''}`
-    if (seen.has(key)) return
-    seen.add(key)
-    roots.push(root)
-  }
-
-  for (const input of inputs) {
-    const described = await describeScanRoot(input)
-    if (described === null) {
-      warnings.push(`目录不存在：${resolve(input)}`)
-      continue
-    }
-    const configPath = await findExtraModelConfig(input)
-    if (configPath !== null) {
-      try {
-        const text = await readFile(configPath, 'utf8')
-        for (const config of parseExtraModelConfig(configPath, text)) {
-          for (const root of await extraRootsFor(config, warnings)) add(root)
-        }
-      } catch (error) {
-        warnings.push(`无法读取共享目录配置 ${configPath}：${error instanceof Error ? error.message : String(error)}`)
-      }
-    }
-    add(described)
-  }
-
-  expandedRootsCache.set(cacheKey, { at: Date.now(), roots, warnings: warnings.slice() })
-  return { roots, warnings }
+interface ServerModelCategory {
+  name: string
+  folders: string[]
 }
 
-function modelTypeOf(root: ScanRoot, fullPath: string): string {
-  if (root.forcedType !== undefined) return root.forcedType
-  const rel = relative(root.path, fullPath)
-  const parts = rel.split(sep)
-  return parts.length > 1 ? parts[0]!.toLowerCase() : 'other'
+/**
+ * Ask the running ComfyUI for its own folder list. `GET /experiment/models`
+ * returns `[{ name, folders }]` and is the only way to learn about model
+ * folders outside the install (an SD-WebUI tree, a second drive, an
+ * `extra_model_paths.yaml` we never saw). Any failure — offline, old ComfyUI
+ * without the route, auth — just means "no server roots".
+ */
+async function fetchServerCategories(baseUrl: string, apiKey: string | undefined, timeoutMs: number): Promise<ServerModelCategory[] | null> {
+  const trimmed = baseUrl.trim()
+  if (trimmed === '') return null
+  const url = `${trimmed.replace(/\/+$/, '')}/experiment/models`
+  try {
+    const response = await fetch(url, {
+      headers: {
+        accept: 'application/json',
+        ...(apiKey === undefined || apiKey === '' ? {} : { authorization: `Bearer ${apiKey}` }),
+      },
+      signal: AbortSignal.timeout(Math.max(500, Math.min(timeoutMs, SERVER_TIMEOUT_MS))),
+    })
+    if (!response.ok) return null
+    const payload = (await response.json()) as unknown
+    if (!Array.isArray(payload)) return null
+    const categories: ServerModelCategory[] = []
+    for (const item of payload) {
+      if (typeof item !== 'object' || item === null) continue
+      const record = item as Record<string, unknown>
+      if (typeof record.name !== 'string' || !Array.isArray(record.folders)) continue
+      const folders = record.folders.filter((folder): folder is string => typeof folder === 'string' && folder.trim() !== '')
+      if (folders.length > 0) categories.push({ name: record.name, folders })
+    }
+    return categories.length > 0 ? categories : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Map one server folder (`<...>/models/<type>`, or a nested variant such as
+ * `<...>/models/Stable-diffusion/diffusion_models`) back to its models root so
+ * the whole tree is scanned once instead of once per category.
+ */
+function modelsRootOf(folder: string, category: string): ScanRoot {
+  let current = resolve(folder)
+  for (let guard = 0; guard < 16; guard += 1) {
+    const parent = dirname(current)
+    if (parent === current) break
+    current = parent
+    if (normalizeSegment(basename(current)) === 'models') return { path: current, origin: 'server' }
+  }
+  return {
+    path: resolve(folder),
+    forcedType: canonicalModelType(category) ?? normalizeSegment(category),
+    origin: 'server',
+  }
+}
+
+/** Drop roots nested inside another root: one scan of the parent covers them. */
+function pruneNestedRoots(roots: ScanRoot[]): ScanRoot[] {
+  const sorted = roots.slice().sort((a, b) => a.path.length - b.path.length)
+  const kept: ScanRoot[] = []
+  for (const root of sorted) {
+    const nested = kept.some((parent) => {
+      if (parent.path.toLowerCase() === root.path.toLowerCase()) return true
+      const rel = relative(parent.path, root.path)
+      return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
+    })
+    if (!nested) kept.push(root)
+  }
+  return kept
+}
+
+async function expandScanRoots(options: ScanOptions): Promise<{ roots: ScanRoot[]; warnings: string[]; serverUsed: boolean }> {
+  const inputs = options.roots.map((root) => root.trim()).filter((root) => root !== '')
+  const cacheKey = `${inputs.join('\0')}\0${options.baseUrl ?? ''}`
+  const cached = expandedRootsCache.get(cacheKey)
+  if (options.refresh !== true && cached !== undefined && Date.now() - cached.at < CACHE_TTL_MS) {
+    return { roots: cached.roots, warnings: cached.warnings, serverUsed: cached.serverUsed }
+  }
+
+  const collected: ScanRoot[] = []
+  const warnings: string[] = []
+  const add = (root: ScanRoot): void => { collected.push(root) }
+
+  for (const input of inputs) {
+    await expandConfiguredDir(input, add, warnings)
+    const configPath = await findExtraModelConfig(input)
+    if (configPath === null) continue
+    try {
+      const text = await readFile(configPath, 'utf8')
+      for (const config of parseExtraModelConfig(configPath, text)) {
+        for (const root of await extraRootsFor(config, warnings)) add(root)
+      }
+    } catch (error) {
+      warnings.push(`无法读取共享目录配置 ${configPath}：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  // Server-reported folders win over guesses: they include extra paths the
+  // configuration never mentions (SD-WebUI trees, other drives).
+  let serverUsed = false
+  const categories = await fetchServerCategories(
+    options.baseUrl ?? '',
+    options.apiKey,
+    options.timeoutMs ?? SERVER_TIMEOUT_MS,
+  )
+  if (categories !== null) {
+    const before = collected.length
+    for (const category of categories) {
+      for (const folder of category.folders) {
+        if (!(await directoryExists(folder))) continue
+        collected.push(modelsRootOf(folder, category.name))
+      }
+    }
+    serverUsed = collected.length > before
+  }
+
+  // Dedupe by path+type, then drop roots covered by a parent root.
+  const seen = new Set<string>()
+  const unique: ScanRoot[] = []
+  for (const root of collected) {
+    const key = `${root.path.toLowerCase()}\0${root.forcedType ?? ''}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    unique.push(root)
+  }
+  const roots = pruneNestedRoots(unique)
+
+  expandedRootsCache.set(cacheKey, { at: Date.now(), roots, warnings: warnings.slice(), serverUsed })
+  return { roots, warnings, serverUsed }
 }
 
 function previewUrl(root: string, file: string): string {
@@ -381,18 +645,29 @@ async function findPreview(modelPath: string, modelRel: string, root: string): P
   const suffix = extname(modelPath)
   const stem = modelPath.slice(0, modelPath.length - suffix.length)
   const relStem = modelRel.slice(0, modelRel.length - extname(modelRel).length)
+  const fileBase = basename(modelPath)
+  const relFile = basename(modelRel)
   const candidates: Array<{ abs: string; rel: string; kind: 'image' | 'video' }> = []
   for (const ext of IMAGE_PREVIEW_EXTENSIONS) {
     candidates.push({ abs: `${stem}${ext}`, rel: `${relStem}${ext}`, kind: 'image' })
     candidates.push({ abs: `${stem}.preview${ext}`, rel: `${relStem}.preview${ext}`, kind: 'image' })
+    candidates.push({ abs: `${stem}.card${ext}`, rel: `${relStem}.card${ext}`, kind: 'image' })
     candidates.push({ abs: `${modelPath}${ext}`, rel: `${modelRel}${ext}`, kind: 'image' })
-    candidates.push({ abs: join(dir, 'previews', `${basename(stem)}${ext}`), rel: join(dirname(modelRel), 'previews', `${basename(relStem)}${ext}`), kind: 'image' })
+    for (const name of [basename(stem), fileBase]) {
+      candidates.push({ abs: join(dir, 'previews', `${name}${ext}`), rel: join(dirname(modelRel), 'previews', `${name}${ext}`), kind: 'image' })
+    }
   }
   for (const ext of VIDEO_PREVIEW_EXTENSIONS) {
     candidates.push({ abs: `${stem}${ext}`, rel: `${relStem}${ext}`, kind: 'video' })
     candidates.push({ abs: `${stem}.preview${ext}`, rel: `${relStem}.preview${ext}`, kind: 'video' })
+    for (const name of [basename(stem), fileBase]) {
+      candidates.push({ abs: join(dir, 'previews', `${name}${ext}`), rel: join(dirname(modelRel), 'previews', `${name}${ext}`), kind: 'video' })
+    }
   }
+  const checked = new Set<string>()
   for (const candidate of candidates) {
+    if (checked.has(candidate.abs)) continue
+    checked.add(candidate.abs)
     try {
       const info = await stat(candidate.abs)
       if (info.isFile()) return { url: previewUrl(root, candidate.rel), kind: candidate.kind }
@@ -403,7 +678,28 @@ async function findPreview(modelPath: string, modelRel: string, root: string): P
   return null
 }
 
-async function walkModels(root: ScanRoot, dir: string, depth: number, out: { models: ModelEntry[]; entries: number; warnings: string[] }, visited: Set<string>): Promise<void> {
+/**
+ * Category of one file: the deepest directory in its relative path that names
+ * a known category wins, so `models/Lora/loras/x` is LoRA, not "Lora", and
+ * `models/Stable-diffusion/diffusion_models/x` is Diffusion Model.
+ */
+function modelTypeOf(root: ScanRoot, fullPath: string): string {
+  if (root.forcedType !== undefined) return root.forcedType
+  const segments = dirname(relative(root.path, fullPath)).split(sep).filter((segment) => segment !== '' && segment !== '.')
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const mapped = canonicalModelType(segments[index]!)
+    if (mapped !== undefined) return mapped
+  }
+  return segments.length > 0 ? normalizeSegment(segments[0]!) : 'other'
+}
+
+async function walkModels(
+  root: ScanRoot,
+  dir: string,
+  depth: number,
+  out: { models: ModelEntry[]; entries: number; warnings: string[]; sidecars: Map<string, string> },
+  visited: Set<string>,
+): Promise<void> {
   // Follow directory symlinks (common for model folders on another drive), but
   // remember the real path so a link back to an ancestor cannot loop forever.
   const realDir = await realpath(dir).catch(() => dir)
@@ -439,14 +735,20 @@ async function walkModels(root: ScanRoot, dir: string, depth: number, out: { mod
     }
     if (isDirectory) {
       if (SKIP_DIRS.has(entry.name.toLowerCase())) continue
-      if (depth >= MAX_DEPTH) {
-        out.warnings.push(`目录层级超过上限，已跳过 ${full}`)
-        continue
-      }
+      if (depth >= MAX_DEPTH) continue
       await walkModels(root, full, depth + 1, out, visited)
       continue
     }
     if (!isFile) continue
+    if (PLACEHOLDER_PATTERN.test(entry.name)) continue
+    // ComfyUI-Desktop / Civitai keep a per-model metadata file next to the
+    // weights; its preview_url is the only image a bare install may have.
+    if (entry.name.toLowerCase().endsWith(SIDECAR_SUFFIX)) {
+      const stem = entry.name.slice(0, entry.name.length - SIDECAR_SUFFIX.length)
+      const key = join(dir, stem).toLowerCase()
+      if (out.sidecars.size < 5_000) out.sidecars.set(key, full)
+      continue
+    }
     const suffix = extname(entry.name).toLowerCase()
     if (!MODEL_EXTENSIONS.has(suffix)) continue
     let info: Stats
@@ -458,6 +760,9 @@ async function walkModels(root: ScanRoot, dir: string, depth: number, out: { mod
     const rel = relative(root.path, full)
     const type = modelTypeOf(root, full)
     const preview = await findPreview(full, rel, root.path)
+    // The archive sidecar carries the age rating of the cover we downloaded, so a
+    // mature thumbnail can start blurred instead of surprising the user.
+    const previewNsfw = preview === null ? false : await archiveNsfw(full)
     out.models.push({
       id: `${root.path}|${rel}`,
       name: entry.name,
@@ -467,7 +772,9 @@ async function walkModels(root: ScanRoot, dir: string, depth: number, out: { mod
       format: suffix.slice(1),
       size: info.size,
       modifiedAt: info.mtime.toISOString(),
-      ...(preview === null ? {} : { preview: preview.url, previewKind: preview.kind }),
+      root: root.path,
+      ...(preview === null ? {} : { preview: preview.url, previewKind: preview.kind, previewSource: 'file' as const }),
+      ...(previewNsfw ? { previewNsfw: true } : {}),
     })
   }
 }
@@ -480,10 +787,59 @@ async function scanRoot(root: ScanRoot, refresh: boolean): Promise<{ models: Mod
   if (!refresh && cached !== undefined && Date.now() - cached.at < CACHE_TTL_MS) {
     return { models: cached.models, warnings: cached.warnings }
   }
-  const out = { models: [] as ModelEntry[], entries: 0, warnings: [] as string[] }
+  const out = { models: [] as ModelEntry[], entries: 0, warnings: [] as string[], sidecars: new Map<string, string>() }
   await walkModels(root, root.path, 0, out, new Set<string>())
+  await attachSidecarPreviews(root, out.models, out.sidecars)
   rootCache.set(cacheKey, { at: Date.now(), models: out.models, warnings: out.warnings })
   return { models: out.models, warnings: out.warnings }
+}
+
+/**
+ * Attach preview images recorded by ComfyUI-Desktop in `<name>.metadata.json`.
+ * Civitai downloads populate `preview_url`; a model without a local image then
+ * still shows a thumbnail, and an empty value simply leaves the placeholder.
+ */
+async function attachSidecarPreviews(root: ScanRoot, models: ModelEntry[], sidecars: Map<string, string>): Promise<void> {
+  if (sidecars.size === 0) return
+  for (const model of models) {
+    if (model.preview !== undefined) continue
+    const absolute = resolve(root.path, model.file)
+    const stem = absolute.slice(0, absolute.length - extname(absolute).length)
+    const sidecar = sidecars.get(stem.toLowerCase())
+    if (sidecar === undefined) continue
+    try {
+      const info = await stat(sidecar)
+      if (info.size > SIDECAR_MAX_BYTES) continue
+      const parsed = JSON.parse(await readFile(sidecar, 'utf8')) as { preview_url?: unknown }
+      const url = parsed.preview_url
+      if (typeof url !== 'string') continue
+      if (!/^https?:\/\//i.test(url.trim())) continue
+      model.preview = url.trim()
+      model.previewKind = 'image'
+      model.previewSource = 'sidecar'
+    } catch {
+      // A broken sidecar never breaks the scan.
+    }
+  }
+}
+
+/**
+ * Whether `<file>.civarchive.json` marks the cover as mature. Written by the
+ * preview downloader next to the weights, so a re-scan keeps the rating without
+ * any network access; a missing or broken file simply leaves the card sharp.
+ */
+async function archiveNsfw(absolute: string): Promise<boolean> {
+  try {
+    const metaPath = absolute + ARCHIVE_META_SUFFIX
+    const info = await stat(metaPath)
+    if (!info.isFile() || info.size > SIDECAR_MAX_BYTES) return false
+    const parsed = JSON.parse(await readFile(metaPath, 'utf8')) as { nsfw?: unknown; nsfwLevel?: unknown }
+    if (parsed.nsfw === true) return true
+    const level = typeof parsed.nsfwLevel === 'string' ? parsed.nsfwLevel.toLowerCase() : ''
+    return /mature|explicit|adult|^x$/.test(level)
+  } catch {
+    return false
+  }
 }
 
 function isInside(parent: string, child: string): boolean {
@@ -497,15 +853,26 @@ function typeRank(type: string): number {
   return type === 'other' ? Number.MAX_SAFE_INTEGER : MODEL_TYPE_ORDER.length
 }
 
-/** Scan every configured ComfyUI directory and group the models by type. */
-export async function scanModelLibrary(roots: string[], refresh = false): Promise<ModelLibrary> {
-  const expanded = await expandConfiguredRoots(roots, refresh)
-  const warnings = expanded.warnings.slice()
+function pushWarning(list: string[], warning: string): void {
+  if (list.includes(warning) || list.length >= MAX_WARNINGS) return
+  if (list.some((existing) => existing.split('：')[0] === warning.split('：')[0]) && warning.includes('：')) return
+  list.push(warning)
+}
+
+/** Scan every discoverable ComfyUI directory and group the models by type. */
+export async function scanModelLibrary(options: ScanOptions): Promise<ModelLibrary> {
+  const expanded = await expandScanRoots(options)
+  const warnings: string[] = []
+  for (const warning of expanded.warnings) pushWarning(warnings, warning)
   const byFile = new Map<string, ModelEntry>()
+  const roots: string[] = []
+  const sources = { config: 0, server: 0, yaml: 0 }
   for (const root of expanded.roots) {
-    const result = await scanRoot(root, refresh)
+    roots.push(root.path)
+    sources[root.origin] += 1
+    const result = await scanRoot(root, options.refresh === true)
     for (const model of result.models) {
-      const absolute = resolve(root.path, model.file)
+      const absolute = resolve(root.path, model.file).toLowerCase()
       const existing = byFile.get(absolute)
       // A shared category is more informative than the generic folder name
       // (`ckpt` vs `checkpoints`), so keep the better-known type.
@@ -513,9 +880,8 @@ export async function scanModelLibrary(roots: string[], refresh = false): Promis
         byFile.set(absolute, model)
       }
     }
-    for (const warning of result.warnings) {
-      if (!warnings.includes(warning)) warnings.push(warning)
-    }
+    for (const warning of result.warnings) pushWarning(warnings, warning)
+    trustedRoots.add(root.path.toLowerCase())
   }
   const models = [...byFile.values()]
 
@@ -534,31 +900,39 @@ export async function scanModelLibrary(roots: string[], refresh = false): Promis
     .sort((a, b) => (order.get(a.type) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.type) ?? Number.MAX_SAFE_INTEGER) || a.type.localeCompare(b.type))
 
   return {
-    roots: [...new Set(expanded.roots.map((root) => root.path))],
+    roots: [...new Set(roots)],
     groups,
     total: models.length,
     previewCount: models.filter((model) => model.preview !== undefined).length,
     warnings,
     scannedAt: new Date().toISOString(),
+    sources,
+    serverUsed: expanded.serverUsed,
   }
+}
+
+/** True when the last scan (or the configuration) vouches for this folder. */
+async function rootIsTrusted(options: ScanOptions, rootAbs: string): Promise<boolean> {
+  const key = rootAbs.toLowerCase()
+  if (trustedRoots.has(key)) return true
+  const expanded = await expandScanRoots(options)
+  return expanded.roots.some((root) => resolve(root.path).toLowerCase() === key)
 }
 
 /**
  * Resolve a preview request to a concrete file. Both the requested root and
- * the resolved file must stay inside a directory the user configured — the
- * query string is untrusted, same as every other browser input.
+ * the resolved file must stay inside a directory this plugin discovered, so the
+ * query string (untrusted, same as every other browser input) cannot read
+ * arbitrary paths.
  */
 export async function resolveModelPreview(
-  configRoots: string[],
+  options: ScanOptions,
   requestedRoot: string,
   file: string,
 ): Promise<{ path: string; contentType: string; size: number } | null> {
   if (requestedRoot === '' || file === '' || isAbsolute(file)) return null
   const rootAbs = resolve(requestedRoot)
-  // Shared model folders are allowed too, but only when the current
-  // extra_model_paths configuration actually expanded to this directory.
-  const expanded = await expandConfiguredRoots(configRoots, false)
-  if (!expanded.roots.some((root) => resolve(root.path) === rootAbs)) return null
+  if (!(await rootIsTrusted(options, rootAbs))) return null
   try {
     const rootReal = await realpath(rootAbs)
     const fileReal = await realpath(resolve(rootReal, file))

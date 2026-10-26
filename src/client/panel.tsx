@@ -149,8 +149,10 @@ interface ModelEntry {
   format: string
   size: number
   modifiedAt: string
+  root?: string
   preview?: string
   previewKind?: 'image' | 'video'
+  previewSource?: 'file' | 'sidecar'
 }
 
 interface ModelGroup {
@@ -167,6 +169,8 @@ interface ModelLibrary {
   previewCount: number
   warnings: string[]
   scannedAt: string
+  sources?: { config: number; server: number; yaml: number }
+  serverUsed?: boolean
 }
 
 /** One file inside a workflow's skill pack. */
@@ -3292,6 +3296,7 @@ const MODEL_TYPE_LABELS: Record<string, string> = {
   loras: 'LoRA',
   lora: 'LoRA',
   vae: 'VAE',
+  vae_approx: 'VAE Approx',
   clip: 'CLIP',
   text_encoders: 'Text Encoder',
   clip_vision: 'CLIP Vision',
@@ -3306,9 +3311,21 @@ const MODEL_TYPE_LABELS: Record<string, string> = {
   photomaker: 'PhotoMaker',
   style_models: 'Style Model',
   model_patches: 'Model Patch',
+  ipadapter: 'IPAdapter',
+  pulid: 'PuLID',
   facerestore_models: 'Face Restore',
   sams: 'SAM',
   ultralytics: 'Ultralytics',
+  detection: 'Detection',
+  audio_encoders: 'Audio Encoder',
+  background_removal: 'Background Removal',
+  frame_interpolation: 'Frame Interpolation',
+  geometry_estimation: 'Geometry',
+  latent_upscale_models: 'Latent Upscale',
+  optical_flow: 'Optical Flow',
+  diffusers: 'Diffusers',
+  onnx: 'ONNX',
+  classifiers: 'Classifier',
   other: 'Other',
 }
 
@@ -3318,20 +3335,55 @@ function modelTypeLabel(type: string): string {
   return type.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
 }
 
-/** One model tile: thumbnail when a sibling preview exists, metadata otherwise. */
-function ModelCard({ t, model, onOpen }: { t: ComfyUIPanelProps['t']; model: ModelEntry; onOpen: () => void }): ReturnType<typeof h> {
+/** Stable hue per model type, so placeholders are distinguishable at a glance. */
+function typeHue(type: string): number {
+  let hash = 0
+  for (const char of type) hash = (hash * 31 + char.charCodeAt(0)) % 360
+  return hash
+}
+
+/** One model tile: thumbnail when a sibling preview exists, a type badge otherwise. */
+function ModelCard({ t, model, rootHint, revealed, onReveal, onOpen }: {
+  t: ComfyUIPanelProps['t']
+  model: ModelEntry
+  rootHint?: string
+  /** The user already asked to see this mature cover. */
+  revealed: boolean
+  onReveal: () => void
+  onOpen: () => void
+}): ReturnType<typeof h> {
   const [broken, setBroken] = useState(false)
   const hasPreview = model.preview !== undefined && !broken
-  return h('button', {
-    type: 'button',
+  // A mature cover starts blurred: the tile still shows that artwork exists, the
+  // content stays hidden until the pill in the corner (or a click) reveals it.
+  const mature = hasPreview && model.previewNsfw === true
+  const hidden = mature && !revealed
+  const folder = model.relativePath.includes('/') ? model.relativePath.slice(0, model.relativePath.lastIndexOf('/')) : '.'
+  const pathLabel = rootHint === undefined ? folder : `${folder} · ${rootHint}`
+  const activate = (): void => {
+    if (hidden) {
+      onReveal()
+      return
+    }
+    onOpen()
+  }
+  const thumbClass = hidden ? 'dsc-model-thumb dsc-model-thumb--nsfw' : 'dsc-model-thumb'
+  return h('div', {
     className: hasPreview ? 'dsc-model' : 'dsc-model dsc-model--no-preview',
-    title: model.relativePath,
-    onClick: onOpen,
+    role: 'button',
+    tabIndex: 0,
+    title: `${model.name}\n${model.root ?? ''}\n${model.relativePath}`,
+    onClick: activate,
+    onKeyDown: (event: { key: string; preventDefault: () => void }) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return
+      event.preventDefault()
+      activate()
+    },
   },
     hasPreview
       ? model.previewKind === 'video'
         ? h('video', {
-            className: 'dsc-model-thumb',
+            className: thumbClass,
             src: model.preview,
             muted: true,
             playsInline: true,
@@ -3339,19 +3391,34 @@ function ModelCard({ t, model, onOpen }: { t: ComfyUIPanelProps['t']; model: Mod
             onError: () => setBroken(true),
           })
         : h('img', {
-            className: 'dsc-model-thumb',
+            className: thumbClass,
             src: model.preview,
-            alt: model.name,
+            alt: hidden ? t('modelNsfwTitle') : model.name,
             loading: 'lazy',
             onError: () => setBroken(true),
           })
-      : h('div', { className: 'dsc-model-thumb dsc-model-placeholder' },
+      : h('div', {
+          className: 'dsc-model-thumb dsc-model-placeholder',
+          style: { background: `linear-gradient(140deg, hsl(${typeHue(model.type)} 34% 22%), hsl(${(typeHue(model.type) + 36) % 360} 38% 12%))` },
+        },
+          h('span', { className: 'dsc-model-badge' }, modelTypeLabel(model.type)),
           h('span', { className: 'dsc-model-ext' }, model.format.toUpperCase()),
-          h('span', null, t('modelNoPreview')),
+          h('span', { className: 'dsc-model-nopreview-label' }, t('modelNoPreview')),
         ),
+    mature
+      ? h('button', {
+          type: 'button',
+          className: hidden ? 'dsc-nsfw dsc-nsfw--hidden' : 'dsc-nsfw',
+          title: t(hidden ? 'modelNsfwShow' : 'modelNsfwHide'),
+          onClick: (event: { stopPropagation: () => void }) => {
+            event.stopPropagation()
+            onReveal()
+          },
+        }, hidden ? `NSFW · ${t('modelNsfwShow')}` : t('modelNsfwHide'))
+      : null,
     h('div', { className: 'dsc-model-name' }, model.name),
     h('div', { className: 'dsc-model-meta' }, `${model.format.toUpperCase()} · ${formatBytes(model.size)}`),
-    h('div', { className: 'dsc-model-path' }, model.relativePath),
+    h('div', { className: 'dsc-model-path', title: model.relativePath }, pathLabel),
   )
 }
 
@@ -3363,6 +3430,17 @@ function LibraryTab({ t, onPreview }: { t: ComfyUIPanelProps['t']; onPreview: (i
   const [search, setSearch] = useState('')
   const [type, setType] = useState('')
   const [relRefreshing, setRelRefreshing] = useState(false)
+  /** Model ids whose mature cover the user already chose to see. */
+  const [revealedIds, setRevealedIds] = useState<Set<string>>(() => new Set<string>())
+
+  const toggleReveal = (id: string): void => {
+    setRevealedIds((previous) => {
+      const next = new Set(previous)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
 
   const load = useCallback(async (refresh: boolean): Promise<void> => {
     setLoading(true)
@@ -3412,6 +3490,11 @@ function LibraryTab({ t, onPreview }: { t: ComfyUIPanelProps['t']; onPreview: (i
   const rootsLabel = library.roots.length > 3
     ? `${library.roots.slice(0, 3).join(' · ')} +${library.roots.length - 3}`
     : library.roots.join(' · ')
+  const sources = library.sources ?? { config: 0, server: 0, yaml: 0 }
+  const sourceBits: string[] = []
+  if (sources.config > 0) sourceBits.push(t('modelSourceConfig', { count: sources.config }))
+  if (sources.server > 0) sourceBits.push(t('modelSourceServer', { count: sources.server }))
+  if (sources.yaml > 0) sourceBits.push(t('modelSourceYaml', { count: sources.yaml }))
 
   const openModel = (model: ModelEntry): void => {
     const index = withPreview.findIndex((candidate) => candidate.id === model.id)
@@ -3446,10 +3529,19 @@ function LibraryTab({ t, onPreview }: { t: ComfyUIPanelProps['t']; onPreview: (i
       h('button', { className: 'dsc-btn', disabled: loading || relRefreshing, onClick: refresh }, t('refresh')),
     ),
     library.roots.length > 0
-      ? h('div', { className: 'dsc-hint dsc-model-roots', title: library.roots.join('\n') }, `${t('modelRoots')}: ${rootsLabel}`)
+      ? h('div', { className: 'dsc-hint dsc-model-roots', title: library.roots.join('\n') },
+          `${t('modelRoots')}: ${rootsLabel}`,
+          h('span', { className: 'dsc-model-roots-state' }, library.serverUsed === true ? t('modelServerOnline') : t('modelServerOffline')),
+        )
       : null,
     library.total > 0
-      ? h('div', { className: 'dsc-hint' }, t('modelSummary', { models: library.total, types: library.groups.length, previews: library.previewCount }))
+      ? h('div', { className: 'dsc-hint' },
+          t('modelSummary', { models: library.total, types: library.groups.length, previews: library.previewCount }),
+          ...(sourceBits.length > 0 ? [` · ${sourceBits.join(' · ')}`] : []),
+        )
+      : null,
+    library.total > 0 && library.previewCount === 0
+      ? h('div', { className: 'dsc-hint' }, t('modelPreviewHint'))
       : null,
     error !== null ? h(ErrorNote, { t, message: error }) : null,
     library.warnings.length > 0
@@ -3464,17 +3556,31 @@ function LibraryTab({ t, onPreview }: { t: ComfyUIPanelProps['t']; onPreview: (i
         ? h('div', { className: 'dsc-meta' }, t('modelNoModels'))
         : visible.length === 0
           ? h('div', { className: 'dsc-meta' }, t('modelNoMatch'))
-          : groups.map((group) => h('details', { key: group.type, className: 'dsc-fold', open: true },
-              h('summary', null, `${modelTypeLabel(group.type)} (${group.models.length})`),
+          : groups.map((group) => {
+            const bytes = group.models.reduce((sum, model) => sum + model.size, 0)
+            const groupPreviews = group.models.filter((model) => model.preview !== undefined).length
+            const nameCounts = new Map<string, number>()
+            for (const model of group.models) nameCounts.set(model.name, (nameCounts.get(model.name) ?? 0) + 1)
+            return h('details', { key: group.type, className: 'dsc-fold', open: true },
+              h('summary', null,
+                `${modelTypeLabel(group.type)} (${group.models.length})`,
+                h('span', { className: 'dsc-fold-meta' }, ` · ${formatBytes(bytes)}${groupPreviews === 0 ? ` · ${t('modelNoPreview')}` : ` · ${groupPreviews}`}`),
+              ),
               h('div', { className: 'dsc-fold-body' },
                 h('div', { className: 'dsc-models-grid' }, group.models.map((model) => h(ModelCard, {
                   key: model.id,
                   t,
                   model,
+                  revealed: revealedIds.has(model.id),
+                  onReveal: () => toggleReveal(model.id),
+                  ...((nameCounts.get(model.name) ?? 0) > 1 && model.root !== undefined
+                    ? { rootHint: model.root.split(/[\\/]/).slice(-2).join('/') }
+                    : {}),
                   onOpen: () => openModel(model),
                 }))),
               ),
-            )),
+            )
+          }),
   )
 }
 

@@ -338,7 +338,15 @@ export function mountComfyUIRoutes(ctx: Context, runtime: ComfyUIRuntime): (() =
       }
       try {
         const refresh = new URL(request.url ?? '/', 'http://localhost').searchParams.get('refresh') === '1'
-        const library = await scanModelLibrary(runtime.getConfig().comfyuiDirs, refresh)
+        const library = await scanModelLibrary({
+          roots: runtime.getConfig().comfyuiDirs,
+          // The running server knows model folders the configuration never
+          // mentions (SD-WebUI trees, other drives); ask it, tolerate absence.
+          baseUrl: runtime.getConfig().baseUrl,
+          apiKey: await runtime.getApiKey(),
+          timeoutMs: runtime.getConfig().connectTimeoutMs,
+          refresh,
+        })
         sendJson(response, 200, { ok: true, ...library })
       } catch (error) {
         sendJson(response, 200, {
@@ -350,6 +358,8 @@ export function mountComfyUIRoutes(ctx: Context, runtime: ComfyUIRuntime): (() =
           previewCount: 0,
           warnings: [],
           scannedAt: new Date().toISOString(),
+          sources: { config: 0, server: 0, yaml: 0 },
+          serverUsed: false,
         })
       }
     }),
@@ -366,7 +376,7 @@ export function mountComfyUIRoutes(ctx: Context, runtime: ComfyUIRuntime): (() =
       const url = new URL(request.url ?? '/', 'http://localhost')
       const root = url.searchParams.get('root') ?? ''
       const file = url.searchParams.get('file') ?? ''
-      const target = await resolveModelPreview(runtime.getConfig().comfyuiDirs, root, file)
+      const target = await resolveModelPreview({ roots: runtime.getConfig().comfyuiDirs }, root, file)
       if (target === null) {
         sendJson(response, 404, { error: 'preview not found' })
         return

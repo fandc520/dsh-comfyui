@@ -264,16 +264,36 @@ select.dsc-input option { background: var(--dsw-alias-bg-layer-1); color: var(--
   display: flex; flex-direction: column; min-width: 0; padding: 0; text-align: left;
   border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; overflow: hidden;
   background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary);
-  font: inherit; cursor: pointer;
+  font: inherit; cursor: pointer; position: relative;
 }
 .dsc-model:hover { border-color: var(--dsw-alias-border-l2); }
 .dsc-model-thumb { width: 100%; height: 120px; object-fit: cover; display: block; background: #000; }
+/* Mature covers: the tile keeps its layout, the pixels stay unreadable until revealed. */
+.dsc-model-thumb--nsfw { filter: blur(16px) saturate(0.8); transform: scale(1.08); }
+.dsc-nsfw {
+  position: absolute; top: 6px; right: 6px; z-index: 2;
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 999px; font-size: 11px; line-height: 1.6;
+  font-family: inherit; cursor: pointer;
+  background: rgba(12, 14, 18, 0.74); color: var(--dsw-alias-label-primary);
+  border: 1px solid var(--dsw-alias-border-l2);
+}
+.dsc-nsfw:hover { background: rgba(12, 14, 18, 0.92); }
+.dsc-nsfw--hidden { border-color: rgba(244, 114, 182, 0.7); color: #fbcfe8; }
 .dsc-model-placeholder {
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
   box-sizing: border-box; padding: 8px; background: var(--dsw-alias-bg-layer-2);
   color: var(--dsw-alias-label-secondary); font-size: 11px; text-align: center;
 }
+.dsc-model-badge {
+  font-size: 12px; font-weight: 700; letter-spacing: 0.02em; color: var(--dsw-alias-label-primary);
+  padding: 2px 7px; border-radius: 999px; background: rgba(255, 255, 255, 0.14);
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .dsc-model-ext { font-weight: 600; font-size: 12px; color: var(--dsw-alias-label-primary); }
+.dsc-model-nopreview-label { font-size: 10px; opacity: 0.7; }
+.dsc-model-roots-state { color: var(--dsw-alias-label-tertiary); margin-left: 6px; }
+.dsc-fold-meta { font-weight: 400; font-size: 11px; color: var(--dsw-alias-label-tertiary); }
 .dsc-model-name { padding: 5px 7px 0; font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; box-sizing: border-box; }
 .dsc-model-meta { padding: 1px 7px 0; font-size: 11px; color: var(--dsw-alias-label-secondary); }
 .dsc-model-path { padding: 1px 7px 6px; font-size: 10px; color: var(--dsw-alias-label-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; box-sizing: border-box; }
