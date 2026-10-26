@@ -177,6 +177,7 @@ TTS-Audio-Suite（\`{comfyuiDir}/custom_nodes/tts_audio_suite\`）的"🎭 Chara
 
 - 面板"ComfyUI 端保存"分区列出每个图工作流：未提取显示"未提取"，已提取显示派生出的运行工作流列表。
 - 点**提取**：单分量直接拆；多分量弹出选项（分析报告 + 整体/按分量/主流程）。也可点**查看**看节点清单和 JSON。
+- 面板第四个页签**库**按 \`models/<类型>\` 分组列出本机模型（checkpoint / LoRA / VAE / Diffusion Model / Text Encoder / ControlNet / Upscale 等），支持搜索、类型筛选和预览图/视频。目录来源有三层：①设置里的「ComfyUI 目录」（自动展开 ComfyUI 安装根、裸 \`models\` 目录、单个类别目录，以及 ComfyUI-Desktop 的 \`ComfyUI-Shared/models\` 与 \`ComfyUI-Installs/*/ComfyUI/models\`）；②该目录下的 \`extra_model_paths.yaml\` / \`.yml\` 共享模型路径；③**运行中的 ComfyUI 通过 \`GET /experiment/models\` 上报的模型目录**（这是看到 SD-WebUI 目录、其它磁盘模型的唯一途径，服务器离线时自动跳过）。ComfyUI 未连接或未运行时也能用。示例图/视频来自模型旁边的同名文件（\`name.png\`、\`name.preview.png\`、\`previews/name.png\`，视频 \`.mp4\`/\`.webm\`）；没有示例图时卡片显示类型徽标。
 - 用户也可以不经过图，直接在插件库"新建工作流"粘贴 API JSON（或选择 .json 文件）作为运行工作流导入。
 - 工具栏"导出预设 / 导入预设"：导出把选中的运行工作流连同参数与技能包打包成一个 .zip 预设包；导入选中包内的工作流后**创建为新工作流**（重名自动加"（导入）"后缀），不会覆盖库里已有的工作流，技能包一并还原（超限文件会跳过并提示）。用户要换机 / 备份 / 分享工作流时引导用这对按钮。
 `,
