@@ -124,7 +124,8 @@ export function ComfyUISettings({ t }: ComfyUISettingsProps): ReturnType<typeof 
         className: 'dsc-input',
         value: lang,
         onChange: (event: { target: { value: string } }) => {
-          const next: Lang = event.target.value === 'en' ? 'en' : 'zh'
+          const v = event.target.value
+          const next: Lang = v === 'zh' || v === 'en' || v === 'fr' ? v : 'zh'
           setLangState(next)
           setLang(next)
           window.location.reload()
@@ -132,6 +133,7 @@ export function ComfyUISettings({ t }: ComfyUISettingsProps): ReturnType<typeof 
       },
         h('option', { value: 'zh' }, '中文'),
         h('option', { value: 'en' }, 'English'),
+        h('option', { value: 'fr' }, 'Français'),
       ),
       h('div', { className: 'dsc-hint' }, t('languageHint')),
     ),
